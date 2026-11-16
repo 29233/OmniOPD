@@ -18,7 +18,7 @@ from safetensors import safe_open
 from safetensors.torch import load_file
 from torch import nn
 
-from omni_mopd.data import OmniEncoder, audit_timing
+from omni_mopd.data import OmniEncoder, audit_timing, video_preprocessing_for_run
 from omni_mopd.eval_official_language import sha
 from omni_mopd.modeling import extend_positions
 from swift_plugin.sam2_segmentation import AuroraSAM2VideoHead, preprocess_sam2_frames
@@ -89,6 +89,7 @@ def run(args):
         raise ValueError("Snapshot is not this run's native FSDP checkpoint")
     if not snapshot["all_frozen_tensors_exact_after_dtype_cast"]:
         raise ValueError("Frozen initializer weights differ")
+    video_preprocessing = video_preprocessing_for_run(MODEL_TRAIN / "omni_training_manifest.json")
     timing = audit_timing(ROOT / "outputs/artifacts/refavs_fps_audit_20261025/audit.json")
     saved_config = json.loads((MODEL_TRAIN / "global_step_500/actor/huggingface/config.json").read_text())
     if saved_config.get("model_type") != "qwen2_5_omni_thinker" or saved_config.get("attn_implementation") != "sdpa":
@@ -123,6 +124,7 @@ def run(args):
             "trained_mask_components": str(INITIALIZER),
             "trained_mask_base": str(BASE_SAM2),
             "model_timings": timing,
+            "video_preprocessing_source": str(MODEL_TRAIN / "omni_training_manifest.json"),
             "settings": {
                 "world_size": world, "max_pixels": 200704, "max_length": 5120,
                 "max_prompt_length": 4864, "response_length": 256,
@@ -130,6 +132,7 @@ def run(args):
                 "fps_max_frames": 768, "video_max_token_num": 768,
                 "image_max_token_num": 16384, "model_timeline_fps": 1.,
                 "sam_frames": 10, "template": "omni_mopd.data.render_prompt",
+                "video_preprocessing": video_preprocessing,
                 "audio": "original WAV", "decoding": "greedy",
                 "save_masks": True, "per_frame_metrics": True,
                 "mask_directory": str((args.output / "masks").resolve()),
@@ -151,7 +154,8 @@ def run(args):
     projector, sam = projector_and_sam(device)
     seg_id = processor.tokenizer.convert_tokens_to_ids("[SEG]")
     eos = processor.tokenizer.convert_tokens_to_ids("<|im_end|>")
-    encoder = OmniEncoder(processor, model.config, fps=1., max_pixels=200704)
+    encoder = OmniEncoder(processor, model.config, fps=1., max_pixels=200704,
+                          video_preprocessing=video_preprocessing)
     record_path = args.output / f"{args.split}.rank{rank}.jsonl"
     count = class_count = seg_count = 0
     sums = [0., 0.]

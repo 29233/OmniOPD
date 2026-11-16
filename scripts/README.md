@@ -1,5 +1,26 @@
 # AURORA Scripts Directory Index
 
+> **Scope:** This is an index of historical recipes. The trimmed OmniOPD
+> checkout does not contain every synthesis/preparation script named below
+> (for example `prepare_merged_sft_dataset.py`,
+> `generate_refavs_structured_cot.py`, and
+> `prepare_sam2_sft_initializer.py`). The already-generated reviewed
+> manifests or the missing scripts and their dependencies must be supplied
+> separately before claiming from-scratch data regeneration. Use
+> `COLLABORATION_HANDOFF.md` for the verified minimal input set.
+
+**Historical-only source not in this checkout:** `call_doubao_video.py`,
+`check_refavs_structured_cot.py`, `generate_non_audio_answer_cot.py`,
+`generate_refavs_clip_audio_privilege.py`,
+`generate_refavs_first_mask_visual_privilege.py`,
+`generate_refavs_structured_cot.py`, `match_refavs_templates.py`,
+`prepare_merged_opd_source.py`, `prepare_merged_sft_dataset.py`,
+`prepare_privileged_top10_opd.py`, `prepare_refavs_visual_opsd.py`,
+`prepare_sam2_sft_initializer.py`,
+`prepare_verified_opd_probe_conditions.py` and
+`refavs_audio_keyword_policy.py`. Their names below document historical
+pipeline provenance; none is a working command in this trimmed checkout.
+
 This directory organizes all data preparation, training, evaluation, and utility scripts by functional stage:
 
 ```text

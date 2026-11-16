@@ -54,6 +54,63 @@ def tiny_thinker():
 
 
 class MigrationTests(unittest.TestCase):
+    def test_video_fetch_uses_swift_frame_resolution_policy(self):
+        """SFT's video list has no explicit per-frame max_pixels override."""
+        from types import SimpleNamespace
+        from omni_mopd.data import OmniEncoder
+
+        frames = [f"/example/frames/{index:02d}.jpg" for index in range(10)]
+        row = {
+            "messages": [{"role": "user", "content": "<video><audio>find it"}],
+            "videos": [frames], "sam_frame_paths": frames, "audios": ["/example/audio.wav"],
+        }
+
+        class DummyProcessor:
+            feature_extractor = SimpleNamespace(sampling_rate=16000)
+            video_processor = SimpleNamespace(temporal_patch_size=2)
+
+            def __call__(self, **kwargs):
+                return {
+                    "input_ids": torch.tensor([[1, 2]]),
+                    "attention_mask": torch.tensor([[1, 1]]),
+                    "video_grid_thw": torch.tensor([[5, 2, 2]]),
+                    "video_second_per_grid": torch.tensor([2.0]),
+                }
+
+        with patch("pathlib.Path.is_file", return_value=True), \
+                patch("librosa.load", return_value=(np.zeros(64), 16000)), \
+                patch("qwen_omni_utils.fetch_video", return_value=torch.zeros(10, 3, 4, 4)) as fetch, \
+                patch("omni_mopd.data.rope_positions", return_value=torch.ones(3, 1, 2)):
+            encoded, _, _ = OmniEncoder(
+                DummyProcessor(), SimpleNamespace(), fps=1.0, max_pixels=200704
+            ).encode(row)
+        self.assertEqual(fetch.call_args.args[0], {"video": frames, "sample_fps": 1.0})
+        self.assertEqual(encoded["video_second_per_grid"].tolist(), [2.0])
+        with patch("pathlib.Path.is_file", return_value=True), \
+                patch("librosa.load", return_value=(np.zeros(64), 16000)), \
+                patch("qwen_omni_utils.fetch_video", return_value=torch.zeros(10, 3, 4, 4)) as fetch, \
+                patch("omni_mopd.data.rope_positions", return_value=torch.ones(3, 1, 2)):
+            OmniEncoder(
+                DummyProcessor(), SimpleNamespace(), fps=1.0, max_pixels=200704,
+                video_preprocessing="historical_native_capped",
+            ).encode(row)
+        self.assertEqual(fetch.call_args.args[0],
+                         {"video": frames, "sample_fps": 1.0, "max_pixels": 200704})
+
+    def test_legacy_checkpoint_media_selection_is_fail_closed(self):
+        from omni_mopd.data import LEGACY_VIDEO_ENCODER_SHA256, video_preprocessing_for_run
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "omni_training_manifest.json"
+            manifest.write_text(json.dumps({
+                "omni_adapter_source_sha256": {"omni_mopd/data.py": LEGACY_VIDEO_ENCODER_SHA256},
+            }))
+            self.assertEqual(video_preprocessing_for_run(manifest), "historical_native_capped")
+            manifest.write_text(json.dumps({"media": {"video_preprocessing": "swift_training_parity"}}))
+            self.assertEqual(video_preprocessing_for_run(manifest), "swift_training_parity")
+            manifest.write_text(json.dumps({"omni_adapter_source_sha256": {"omni_mopd/data.py": "unknown"}}))
+            with self.assertRaises(ValueError):
+                video_preprocessing_for_run(manifest)
+
     def test_native_core_untouched(self):
         hashes = verify_native_core(Path(__file__).resolve().parents[1])
         self.assertEqual(len(hashes), 5)

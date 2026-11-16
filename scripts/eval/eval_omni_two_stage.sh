@@ -38,7 +38,7 @@ GENERATE_ARGS=(--family "${FAMILY}" --model "${MODEL_PATH}" --checkpoint "${CHEC
 if [[ -n "${VIDEO_FPS:-}" ]]; then GENERATE_ARGS+=(--video-fps "${VIDEO_FPS}"); fi
 SEGMENT_ARGS=(--checkpoint "${CHECKPOINT}" --splits "${SPLIT_ARGS[@]}"
   --device cuda:0 --cache-size "${CACHE_SIZE:-32}")
-if [[ "${SAVE_MASKS:-0}" == "1" ]]; then SEGMENT_ARGS+=(--save-masks); fi
+SEGMENT_ARGS+=(--save-masks)
 SHARD_DIRS=()
 for ((rank=0; rank<${#GROUPS_ARRAY[@]}; rank++)); do
   SHARD_DIRS+=("${OUTPUT_DIR}/shard-${rank}")

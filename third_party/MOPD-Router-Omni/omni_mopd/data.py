@@ -10,6 +10,19 @@ from torch.utils.data import Dataset
 
 from omni_mopd.modeling import rope_positions
 
+LEGACY_VIDEO_ENCODER_SHA256 = "a6f671f54a1a8e45f0b1a35a59e0334ab19cda6edf7a5563372496609898dd21"
+
+
+def video_preprocessing_for_run(manifest_path):
+    """Reject unrecognized historical media protocols before model loading."""
+    manifest = json.loads(Path(manifest_path).read_text())
+    explicit = manifest.get("media", {}).get("video_preprocessing")
+    if explicit == "swift_training_parity":
+        return explicit
+    if manifest.get("omni_adapter_source_sha256", {}).get("omni_mopd/data.py") == LEGACY_VIDEO_ENCODER_SHA256:
+        return "historical_native_capped"
+    raise ValueError(f"Unknown native video preprocessing for {manifest_path}")
+
 
 def audit_timing(path):
     audit = json.loads(Path(path).read_text())
@@ -56,11 +69,14 @@ def render_prompt(messages):
 
 
 class OmniEncoder:
-    def __init__(self, processor, model_config, *, fps, max_pixels):
+    def __init__(self, processor, model_config, *, fps, max_pixels, video_preprocessing="swift_training_parity"):
         if fps != 1.0:
             raise ValueError("Selected REF-AVS initializer/data contract requires 1 FPS")
+        if video_preprocessing not in ("swift_training_parity", "historical_native_capped"):
+            raise ValueError(f"Unsupported video preprocessing: {video_preprocessing}")
         self.processor, self.model_config = processor, model_config
         self.fps, self.max_pixels = fps, max_pixels
+        self.video_preprocessing = video_preprocessing
 
     def encode(self, row):
         import librosa
@@ -82,9 +98,20 @@ class OmniEncoder:
             "VIDEO_MAX_TOKEN_NUM": 768, "IMAGE_MAX_TOKEN_NUM": 16384,
         }.items():
             setattr(vision_process, name, value)
-        video = fetch_video({
-            "video": frames, "sample_fps": self.fps, "max_pixels": self.max_pixels,
-        }).to(torch.uint8)
+        # Match the trained ms-swift Qwen2_5OmniTemplate.replace_tag video
+        # path: fetch_video({"video": frames, "sample_fps": FPS}) does NOT
+        # pass template.max_pixels into video-frame fetch_image. Per-frame
+        # resolution is controlled by VIDEO_MAX_TOKEN_NUM=768 instead.
+        # Passing max_pixels=200704 here used to shrink the very same clip
+        # from video_grid_thw=[5,40,72] to [5,24,40], removing ~2400 prompt
+        # tokens before native MOPD scored the frozen SFT-initialized policy.
+        video_kwargs = {"video": frames, "sample_fps": self.fps}
+        if self.video_preprocessing == "historical_native_capped":
+            # For replay of an already-trained checkpoint ONLY. Never
+            # silently migrate a resumed/new training run to this legacy
+            # distribution: it drops most of the visual tokens SFT observed.
+            video_kwargs["max_pixels"] = self.max_pixels
+        video = fetch_video(video_kwargs).to(torch.uint8)
         sr = self.processor.feature_extractor.sampling_rate
         audio, _ = librosa.load(row["audios"][0], sr=sr)
         result = dict(self.processor(

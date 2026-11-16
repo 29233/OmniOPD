@@ -1,5 +1,15 @@
 # OmniOPD: On-Policy Distillation, Reinforcement Learning, and Video-Memory Segmentation for Reference Audio-Visual Segmentation
 
+> **Source-only research checkout.** This repository does not include
+> pretrained weights, REF-AVS media, reviewed CoT manifests, or every
+> historical data-synthesis script. Start with
+> [COLLABORATION_HANDOFF.md](COLLABORATION_HANDOFF.md) for the exact artifact
+> inventory and [scripts/docs/INDEPENDENT_VERIFY.md](scripts/docs/INDEPENDENT_VERIFY.md)
+> for tested code paths. Small smoke runs are not official `test_s`/`test_u`
+> benefit measurements.
+> Contributors should also read [CONTRIBUTING.md](CONTRIBUTING.md) and use
+> [.env.example](.env.example) only as a path-configuration example.
+
 **OmniOPD** is a multimodal training and evaluation framework for **Reference Audio-Visual Segmentation (Ref-AVS)**. Built on top of **Omni Multimodal Large Language Models** (`Qwen2.5-Omni-3B/7B`, `Qwen3-Omni-30B-A3B`) and **SAM / SAM2 (Hiera-L Video-Memory)** segmentation heads, this repository provides a unified implementation of:
 
 1. **Structured Chain-of-Thought (CoT) Joint Supervised Fine-Tuning (SFT)** with pixel-level mask supervision (`CE + 2.0 * BCE + 0.5 * Dice`) and sequential SAM2 video-memory propagation across frames;
@@ -28,7 +38,7 @@ OmniOPD/
 │   ├── aurora_privileged_top10_opd.py # Sparse low-likelihood (bottom-10% ± 1) multi-privilege OPD
 │   ├── privileged_top10_loss.py   # Low-likelihood token seed selection and chunked KL
 │   ├── aurora_audio_stage_anchor_opd.py # Stage-aware audio OPD with unprivileged Decision/[SEG] anchor
-│   ├── aurora_grpo.py             # Original 3-reward GRPO (format + class + SAM IoU) + mask loss
+│   ├── aurora_grpo.py             # 3-reward GRPO (format + class + SAM IoU); mask loss optional
 │   ├── aurora_sam2_grpo.py        # SAM2 baseline GRPO with frozen SAM2 video-memory reward decoder
 │   ├── sam2_grpo_rewards.py       # Canonical target category parser and 10-frame mIoU reward helpers
 │   ├── aurora_verified_reward_grpo.py # Class-gated mask reward GRPO (0.5 * C + 0.5 * C * IoU)
@@ -39,7 +49,7 @@ OmniOPD/
 │   ├── aurora_mask_primary.py     # Mask-primary reward (0.2*C + 0.8*IoU) & Decision-span OPD
 │   └── aurora_full_response_opd.py # Full-response token scope Joint OPD ablation
 ├── scripts/
-│   ├── data/                      # Dataset converters, CoT synthesis, audio degradation & difficulty mixtures
+│   ├── data/                      # Included converters, audio controls & mixtures; synthesis incomplete
 │   ├── sft/                       # Stage-1, Stage-2, and SAM2 joint SFT launch scripts
 │   ├── grpo/                      # GRPO reinforcement learning launchers and SAM IoU server
 │   ├── opd/                       # OPSD, sparse OPD, and Verified Routed / Online OPD launchers
@@ -50,6 +60,7 @@ OmniOPD/
 │   ├── deepspeed_zero2_*.json     # DeepSpeed ZeRO-2 configurations (FP16 / BF16)
 │   └── prompts/                   # Settled Structured CoT, Answer-Conditioned CoT & privilege prompts
 └── third_party/
+    ├── sam2/sam2/                 # Vendored SAM2 source (base weights are separate)
     └── MOPD-Router-Omni/          # Native verl FSDP multi-teacher router migration for Qwen2.5-Omni Thinker
 ```
 
@@ -58,7 +69,7 @@ OmniOPD/
 ## Core Algorithms
 
 ### 1. Multimodal Joint SFT with SAM / SAM2 Video-Memory Backend
-Given a 10-frame video clip $V$ (nominal 1 FPS over 10s), audio waveform $A$, and referring expression $r$, the model generates a structured 6-stage Chain-of-Thought (`Reference analysis` $\to$ `Audio evidence` $\to$ `Visual evidence` $\to$ `Cross-modal reasoning` $\to$ `Decision` $\to$ `Segmentation: It is [SEG].`).
+Given a 10-frame video clip $V$ (nominal 1 FPS over 10s), audio waveform $A$, and referring expression $r$, the **SFT target** uses structured reasoning: `Reference analysis` → optional `Audio evidence` → `Visual evidence` → optional `Cross-modal reasoning` → `Decision` → `Segmentation: It is [SEG].` The model does not always obey the requested stage order at inference; see the template audit.
 - The last-layer hidden state of the first `[SEG]` token is projected via `text_hidden_fcs` to a 256-d prompt embedding.
 - **SAM2 Video-Memory Backend (`AURORA_SEG_BACKEND=sam2`)**: Decodes all 10 frames sequentially—Frame 0 initializes the mask, object pointer, and memory features, while Frames $1\dots 9$ attend to conditioning and historical mask memories via `memory_attention` and `memory_encoder`.
 - **Joint Objective**:
@@ -93,10 +104,23 @@ A standalone migration of `MOPD-Router` on `verl` for full-decoder Qwen2.5-Omni 
 ## Installation & Environment
 
 1. **For `ms-swift` (SFT / GRPO / OPSD / Verified Routed OPD)**:
+   Use an isolated Python 3.10 CUDA environment with a compatible
+   PyTorch/Transformers stack. The historical `requirements_ms_swift.txt`
+   pins Transformers **4.x** and does not reproduce the checked **5.x**
+   environment; see
+   [ms-swift observed versions](scripts/setup/requirements_swift_observed_20261117.txt)
+   for the tested SFT/GRPO/OPD path (not a full transitive lockfile).
+   The [native MOPD overlay](scripts/setup/requirements_mopd_overlay_observed_20261116.txt)
+   is a **different environment**. Install
+   [SAM2 runtime dependencies](scripts/setup/requirements_sam2_runtime.txt)
+   and the pinned ms-swift v4.5.2 source plus the local teacher-adapter patch:
    ```bash
-   pip install -r requirements_ms_swift.txt
+   PYTHON_BIN=/path/to/isolated-env/bin/python bash scripts/setup/bootstrap_ms_swift.sh
+   export PYTHONPATH="$PWD/third_party/sam2:$PWD"
    ```
-   For the SAM2 video-memory backend (`AURORA_SEG_BACKEND=sam2`), place the upstream `sam2` checkout under `third_party/sam2` and download `sam2_hiera_large.pt` (or `sam_vit_h_4b8939.pth` for SAM v1) into `models/`.
+   SAM/SAM2 Python source is in the repository once the local additions are
+   committed; SAM2 Hiera-L and SAM ViT-H base **weights** must be supplied
+   separately with appropriate access/terms.
 
 2. **For `third_party/MOPD-Router-Omni`**:
    See [third_party/MOPD-Router-Omni/OMNI_MIGRATION.md](third_party/MOPD-Router-Omni/OMNI_MIGRATION.md) and run:
@@ -109,27 +133,35 @@ A standalone migration of `MOPD-Router` on `verl` for full-decoder Qwen2.5-Omni 
 
 ## Quick Start
 
-All scripts are organized by functional stage under `scripts/` (see [scripts/README.md](scripts/README.md) for a full index).
+The commands below require **your own authorized model/data paths**; they are
+not turnkey downloads. All scripts are organized by functional stage under
+`scripts/` (see [scripts/README.md](scripts/README.md) for current versus
+historical-only recipes).
 
 ### 1. Data & Privilege Preparation (`scripts/data/`)
 ```bash
-# Convert raw REF-AVS splits to ms-swift JSONL format
-python scripts/data/prepare_refavs_swift_sft.py --split train --output outputs/data/refavs/refavs_train.jsonl
-python scripts/data/prepare_refavs_swift_sft.py --split test_s --output outputs/data/refavs/refavs_test_s.jsonl
-python scripts/data/prepare_refavs_swift_sft.py --split test_u --output outputs/data/refavs/refavs_test_u.jsonl
-
-# Initialize SAM2 video-memory weights with a trained Stage-1 adapter
-python scripts/data/prepare_sam2_sft_initializer.py \
-  --source /path/to/stage1_checkpoint \
-  --sam2-checkpoint models/sam2_hiera_large.pt \
-  --output outputs/train/sam2_sft_initializer
+# Example conversion from authorized media/metadata and reviewed CoT input.
+# Supplying the train reasoning JSON is mandatory even when split=test_s.
+python scripts/data/prepare_refavs_swift_sft.py \
+  --dataset-dir /data/REFAVS \
+  --metadata /data/REFAVS/metadata.csv \
+  --reasoning-json /restricted/reviewed_train_reasoning.json \
+  --split train \
+  --output outputs/data/refavs/refavs_train.jsonl
 ```
+The structured 7B SAM2 SFT recipe requires a **reviewed merged SFT JSONL
+and its manifest**, plus the pre-existing Stage-1 initializer adapter. The
+historical merger/initializer synthesis scripts are **not** in this trimmed
+repository; see [collaboration handoff](COLLABORATION_HANDOFF.md) before
+attempting a from-scratch data regeneration.
 
 ### 2. Supervised Fine-Tuning (`scripts/sft/`)
 ```bash
 # Qwen2.5-Omni-7B + SAM2 3-epoch joint SFT (8 GPUs)
 MODEL=models/Qwen2___5-Omni-7B \
 SAM2_CHECKPOINT=models/sam2_hiera_large.pt \
+INIT_ADAPTER=/path/to/stage1_initializer_adapter \
+DATA_DIR=/path/to/reviewed_merged_sft_dir \
 bash scripts/sft/train_merged_sam2_sft_3epoch_8gpu.sh
 
 # Qwen2.5-Omni + SAM (ViT-H) Stage-1 joint SFT
@@ -172,7 +204,8 @@ torchrun --standalone --nproc_per_node=8 scripts/eval/test_qwen2_5_omni_refavs.p
   --splits test_s test_u \
   --run-sam --save-masks
 
-# Two-stage batch evaluation (Stage 1: LLM generation & [SEG] embedding capture -> Stage 2: standalone SAM decoding)
+# Legacy SAM ViT-H two-stage evaluation only (NOT interchangeable with SAM2).
+# Check each checkpoint's actual training FPS and max length before use.
 FAMILY=qwen2_5 \
 CHECKPOINT=/path/to/checkpoint \
 OUTPUT_DIR=outputs/eval/two_stage_run \
@@ -186,7 +219,11 @@ bash scripts/eval/eval_omni_two_stage.sh
 
 - [MS_SWIFT_SFT.md](MS_SWIFT_SFT.md): Stage-1 SFT training objective, prompt contract, and mixed-precision setup.
 - [OUTPUT_LAYOUT.md](OUTPUT_LAYOUT.md): Standard layout for `outputs/data`, `outputs/train`, and `outputs/eval`.
-- [scripts/README.md](scripts/README.md): Complete index of scripts under `scripts/{data,sft,grpo,opd,eval,utils,docs}`.
+- [scripts/README.md](scripts/README.md): Script index; explicitly distinguishes historical recipes missing from this checkout.
+- [COLLABORATION_HANDOFF.md](COLLABORATION_HANDOFF.md): Required code/data/weight artifacts, provenance and sharing checks.
+- [CONTRIBUTING.md](CONTRIBUTING.md): Review, source-only CI, checkpoint parity and evaluation protocol for PRs.
+- [scripts/docs/INDEPENDENT_VERIFY.md](scripts/docs/INDEPENDENT_VERIFY.md): Verified smoke runs and limitations.
+- [scripts/docs/LLM_TEMPLATE_AUDIT_20261117.md](scripts/docs/LLM_TEMPLATE_AUDIT_20261117.md): Training/evaluation and native template parity.
 - [scripts/docs/SAM2_BACKEND_README.md](scripts/docs/SAM2_BACKEND_README.md): SAM2 Hiera-L sequential video-memory integration.
 - [scripts/docs/SAM2_GRPO_README.md](scripts/docs/SAM2_GRPO_README.md): SAM2 frozen-decoder GRPO specification.
 - [scripts/docs/VERIFIED_ROUTED_OPD_README.md](scripts/docs/VERIFIED_ROUTED_OPD_README.md): Verifier-licensed hard-routed OPD + GRPO joint training.

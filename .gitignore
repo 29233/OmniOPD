@@ -12,8 +12,11 @@ __pycache__/
 # Training, evaluation, and runtime outputs
 outputs/
 models/
-model/
-data/
+!/third_party/MOPD-Router-Omni/verl/verl/models/
+model/*
+!/model/__init__.py
+!/model/segment_anything/
+/data/
 runs/
 wandb/
 *.log
@@ -21,6 +24,8 @@ wandb/
 # Virtual environments & caches
 .env
 .venv/
+.venv*/
+/third_party/ms-swift/
 env/
 venv/
 .pytest_cache/

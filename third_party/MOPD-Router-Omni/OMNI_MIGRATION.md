@@ -1,5 +1,14 @@
 # Clean Omni reasoning-only MOPD-Router migration
 
+> **2026-11-17 template correction:** Historical native training step500
+> used an unintended `fetch_video(max_pixels=200704)` frame cap. The trained
+> ms-swift SFT initializer saw video grid `[5,40,72]` on the audited example,
+> whereas old native MOPD saw `[5,24,40]`. New native training now follows
+> ms-swift's frame-list/video-token preparation. Existing step500 weights
+> are **not** repaired; official native evaluators explicitly replay their
+> historically capped input and record this distinction. Details:
+> `../../scripts/docs/LLM_TEMPLATE_AUDIT_20261117.md`.
+
 ## Scope / 不与旧迁移混用
 
 - Fresh clone: `https://github.com/TURLEing/MOPD-Router.git`
@@ -84,7 +93,9 @@ its parent `training_manifest.json`, and
 
 - Ten stored frames per approximately ten seconds: nominal **1 FPS**, exact
   sample instants unverified. Model timeline fixed to 1 FPS.
-- max_pixels=200704; frame/token settings 768/768/16384; native SDPA.
+- image/template max_pixels=200704; **video list uses VIDEO_MAX_TOKEN_NUM
+  (768), not an additional 200704-pixel cap per frame**; frame/token settings
+  768/768/16384; native SDPA.
 - Prompt<=4864 + response<=256 = sequence<=5120. No truncation or silent
   overlength filtering; an invalid row raises an error.
 - BF16 compute/reference weights; FP32 actor parameters/optimizer (native

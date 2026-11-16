@@ -1,0 +1,22 @@
+name: Source checkout contracts
+
+"on":
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  source-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      # No model weights, REF-AVS media, API keys, CUDA, or large pip install.
+      - name: Verify script and dependency-free source contracts
+        run: |
+          python scripts/setup/repo_doctor.py --strict
+          python -m unittest discover -s tests -p 'test_repository_contract.py' -v

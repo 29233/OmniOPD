@@ -15,7 +15,7 @@ from pathlib import Path
 import torch
 import torch.distributed as dist
 
-from omni_mopd.data import OmniEncoder, audit_timing
+from omni_mopd.data import OmniEncoder, audit_timing, video_preprocessing_for_run
 
 
 def sha(path):
@@ -56,6 +56,7 @@ def main():
         source_checkpoint = export["adapter"]
         trainable_tensors_changed = 0
         source_settings = expected_adapter.parent / "training_manifest.json"
+        video_preprocessing = "swift_training_parity"
     else:
         snapshot = json.loads((a.checkpoint / "fsdp_snapshot_manifest.json").read_text())
         if not snapshot["complete"] or snapshot["source_step"] not in {500, 600, 700, 800, 900, 1000}:
@@ -70,6 +71,7 @@ def main():
         source_step = snapshot["source_step"]
         trainable_tensors_changed = snapshot["trainable_language_tensors_changed"]
         source_settings = train / "global_step_500/actor/huggingface/config.json"
+        video_preprocessing = video_preprocessing_for_run(train / "omni_training_manifest.json")
     from transformers import (
         Qwen2_5OmniProcessor, Qwen2_5OmniThinkerForConditionalGeneration,
     )
@@ -105,6 +107,9 @@ def main():
             "trainable_tensors_changed": trainable_tensors_changed,
             "baseline_sft": a.baseline_sft,
             "training_settings_source": str(source_settings),
+            "video_preprocessing": video_preprocessing,
+            "video_preprocessing_source": str(
+                source_settings if a.baseline_sft else train / "omni_training_manifest.json"),
             "training_plan": None if a.baseline_sft else str(
                 root / "outputs/automation/clean_omni_mopd_20261105_v1/plan.json"),
             "source": str(a.source.resolve()), "source_sha256": sha_source,
@@ -114,6 +119,7 @@ def main():
                 "sam_training": False, "sam_evaluation": False, "save_masks": False,
                 "mask_saving_exception": "Explicit language-only diagnostic, no SAM segmentation forward",
                 "audio": f"original {a.split} waveform", "stored_frames": 10,
+                "video_preprocessing": video_preprocessing,
                 "max_pixels": 200704, "fps_max_frames": 768,
                 "video_max_token_num": 768, "image_max_token_num": 16384,
                 "max_prompt_length": 4864, "max_length": 5120,
@@ -142,7 +148,8 @@ def main():
     ).to(device).eval()
     if processor.tokenizer.convert_tokens_to_ids("[SEG]") >= model.get_input_embeddings().num_embeddings:
         raise ValueError("SEG token ID out of trained vocabulary")
-    encoder = OmniEncoder(processor, model.config, fps=1., max_pixels=200704)
+    encoder = OmniEncoder(processor, model.config, fps=1., max_pixels=200704,
+                          video_preprocessing=video_preprocessing)
     eos = processor.tokenizer.convert_tokens_to_ids("<|im_end|>")
     pad = processor.tokenizer.pad_token_id
     scores = {"samples": 0, "class_correct": 0, "seg_emitted": 0, "errors": 0}

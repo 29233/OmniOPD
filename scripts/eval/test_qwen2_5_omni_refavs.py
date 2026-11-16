@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import shutil
@@ -27,6 +28,47 @@ import torch
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
+
+
+def _prompt_style_header(row: dict) -> str:
+    messages = row.get("messages") or []
+    if not messages or messages[0].get("role") != "user":
+        raise ValueError("Missing REF-AVS user prompt")
+    content = str(messages[0].get("content") or "")
+    if content.count("<video>") != 1 or content.count("<audio>") != 1:
+        raise ValueError("Expected exactly one video and audio placeholder")
+    if "<video><audio>" not in content:
+        raise ValueError("REF-AVS prompt changed the training media ordering")
+    return content.split("<video><audio>", 1)[0]
+
+
+def _check_task_prompt_style(train_source: Path, test_sources: dict[str, Path]) -> dict:
+    """Reject old-3B raw/new-7B structured CoT prompt swaps before model load."""
+    if not train_source.is_file():
+        raise FileNotFoundError(f"Training prompt source unavailable: {train_source}")
+    with train_source.open(encoding="utf-8") as handle:
+        train = next((json.loads(line) for line in handle if line.strip()), None)
+    if train is None:
+        raise ValueError(f"Empty training source: {train_source}")
+    header = _prompt_style_header(train)
+    counts = {}
+    for split, path in test_sources.items():
+        with path.open(encoding="utf-8") as handle:
+            rows = [json.loads(line) for line in handle if line.strip()]
+        mismatches = [i for i, row in enumerate(rows)
+                      if _prompt_style_header(row) != header]
+        if mismatches:
+            raise ValueError(
+                f"{split}: {len(mismatches)} rows use a different task prompt "
+                f"than the selected checkpoint's training source; first index={mismatches[0]}. "
+                "Do not evaluate a raw-prompt 3B checkpoint on structured-CoT test input."
+            )
+        counts[split] = len(rows)
+    return {
+        "source": str(train_source.resolve()),
+        "header_sha256": hashlib.sha256(header.encode()).hexdigest(),
+        "header_chars": len(header), "checked_test_rows": counts,
+    }
 
 
 def _add_import_paths() -> None:
@@ -501,6 +543,18 @@ def _build_engine(args):
     config_path = adapter_dir / "adapter_config.json"
     if not state_path.is_file() or not config_path.is_file():
         raise FileNotFoundError(f"Checkpoint must contain adapter_model.safetensors and adapter_config.json: {adapter_dir}")
+    # Restore and validate the trained sidecar BEFORE PEFT wraps
+    # modules_to_save. The adapter can also contain active SAM2 weights:
+    # restoring the sidecar made no difference to the single audited smoke
+    # mask, so that smoke does NOT establish that the older path was random.
+    # Afterwards these modules are ModulesToSaveWrapper objects and their
+    # state_dict keys no longer match the unwrapped sidecar.
+    from swift_plugin.aurora_qwen2_5_omni import _restore_trained_sam_weights
+    if getattr(engine.model, "sam2_head", None) is not None:
+        sidecar = adapter_dir / "sam2_video_decoder.safetensors"
+        if not sidecar.is_file():
+            raise FileNotFoundError(f"Trained SAM2 checkpoint sidecar missing: {sidecar}")
+    _restore_trained_sam_weights(engine.model, str(adapter_dir))
     state = load_file(str(state_path), device="cpu")
     talker_key = "base_model.model.talker.model.embed_tokens.weight"
     # Qwen2.5-Omni model variants differ across Transformers/ms-swift
@@ -813,6 +867,10 @@ def main() -> None:
     parser.add_argument("--torch-dtype", choices=["float16", "bfloat16", "float32"], default="float16")
     parser.add_argument("--max-pixels", type=int, default=None, help="Match the training template max_pixels")
     parser.add_argument("--max-length", type=int, default=None, help="Match the training template max_length")
+    parser.add_argument("--dataset-timing-audit", type=Path,
+                        help="Audited dataset FPS JSON, required when checkpoint has no training manifest")
+    parser.add_argument("--train-prompt-source", type=Path,
+                        help="Override a relocated checkpoint's saved dataset path for prompt-style parity checks")
     parser.add_argument("--match-training-settings", action="store_true",
                         help="Require matching checkpoint args.json and dual_launch.json before loading the model")
     parser.add_argument("--fps-policy", choices=['training', 'dataset'], default='training',
@@ -883,6 +941,91 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     if args.mask_dir is None:
         args.mask_dir = str(output_dir / "masks")
+    # Fail before loading 7B weights on known train/eval preprocessing
+    # mismatches. The SFT checkpoint has no dual_launch.json, so validate
+    # directly against its saved args, projector and parent run manifest.
+    checkpoint_path = Path(args.checkpoint)
+    if checkpoint_path.is_dir():
+        saved_args = json.loads((checkpoint_path / "args.json").read_text())
+        source_manifest = next(
+            (p for p in (checkpoint_path / "training_manifest.json",
+                         checkpoint_path.parent / "training_manifest.json",
+                         checkpoint_path.parent.parent / "training_manifest.json") if p.is_file()),
+            None,
+        )
+        training = json.loads(source_manifest.read_text()) if source_manifest else {}
+        if not training and args.dataset_timing_audit is None:
+            raise ValueError("No saved training manifest: supply --dataset-timing-audit to verify media timing")
+        audit = json.loads(args.dataset_timing_audit.read_text()) if args.dataset_timing_audit else {}
+        if audit and (audit.get("unique_clips_checked", 0) < 1 or audit.get("nominal_fps", 0) <= 0):
+            raise ValueError("Incomplete dataset timing audit")
+        expected = {
+            "max_pixels": args.max_pixels, "max_length": args.max_length,
+            "torch_dtype": args.torch_dtype, "attn_impl": args.attn_impl,
+        }
+        for key, actual in expected.items():
+            if actual is None or saved_args.get(key) != actual:
+                raise ValueError(f"Checkpoint/eval mismatch: {key} train={saved_args.get(key)!r}, eval={actual!r}")
+        if training:
+            for key, actual in (("max_pixels", args.max_pixels), ("max_length", args.max_length),
+                                ("attn_impl", args.attn_impl)):
+                if key in training and training[key] != actual:
+                    raise ValueError(f"Run manifest/eval mismatch: {key}")
+        projector_path = checkpoint_path / "aurora_projector_config.json"
+        projector = json.loads(projector_path.read_text()) if projector_path.is_file() else {}
+        if projector:
+            for key in ("FPS", "AURORA_VIDEO_FPS"):
+                if key not in os.environ or float(os.environ[key]) != float(projector["model_timeline_fps"]):
+                    raise ValueError(f"Checkpoint/eval FPS mismatch: {key}")
+            if int(os.environ["AURORA_NUM_SAM_FRAMES"]) != int(projector["sam_frames"]):
+                raise ValueError("Checkpoint/eval SAM frame count mismatch")
+        nominal_fps = training.get("dataset_nominal_fps", audit.get("nominal_fps"))
+        if audit and training.get("dataset_nominal_fps") is not None and float(audit["nominal_fps"]) != float(nominal_fps):
+            raise ValueError("Training manifest/dataset audit FPS mismatch")
+        data_sources = {split: Path(args.data_dir) / f"refavs_{split}.jsonl" for split in args.splits}
+        datasets = saved_args.get("dataset") or []
+        if isinstance(datasets, str):
+            datasets = [datasets]
+        if not datasets and args.train_prompt_source is None:
+            raise ValueError("Checkpoint args lack a recorded training prompt source")
+        prompt_style = _check_task_prompt_style(
+            args.train_prompt_source or Path(datasets[0]), data_sources
+        )
+        def sha256(path):
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for block in iter(lambda: stream.read(1 << 20), b""):
+                    digest.update(block)
+            return digest.hexdigest()
+        manifest = {
+            "checkpoint": str(checkpoint_path.resolve()),
+            "training_args": str((checkpoint_path / "args.json").resolve()),
+            "training_manifest": str(source_manifest.resolve()) if source_manifest else None,
+            "dataset_timing_audit": str(args.dataset_timing_audit.resolve()) if audit else None,
+            "projector_config": str(projector_path.resolve()) if projector else None,
+            "data_sources_sha256": {split: sha256(path) for split, path in data_sources.items()},
+            "training_prompt_style": prompt_style,
+            "splits": args.splits, "max_samples": args.max_samples,
+            "full_official_split": args.max_samples == -1 and set(args.splits) <= {"test_s", "test_u"},
+            "language_only": not args.run_sam, "save_masks": args.run_sam and args.save_masks,
+            "mask_directory": str(Path(args.mask_dir).resolve()) if args.run_sam and args.save_masks else None,
+            "mask_saving_exception": "language-only diagnostic" if not args.run_sam else None,
+            "per_frame_metrics": args.run_sam,
+            "model_timeline_fps": projector.get("model_timeline_fps"),
+            "dataset_nominal_fps": nominal_fps,
+            "exact_dataset_frame_timestamps_verified": False,
+            "media_limits": {k: os.environ.get(k) for k in
+                             ("FPS_MAX_FRAMES", "VIDEO_MAX_TOKEN_NUM", "IMAGE_MAX_TOKEN_NUM")},
+            "training_settings_matched": expected,
+            "sam_frames": projector.get("sam_frames"),
+            "decoding": {"temperature": args.temperature, "top_p": args.top_p,
+                         "max_new_tokens": args.max_new_tokens},
+            "inference_differences": [
+                "Free greedy generation versus supervised teacher-forced SFT"
+            ] if args.temperature == 0 else ["Free sampled generation versus supervised teacher-forced SFT"],
+            "opd_gain_claim": False,
+        }
+        (output_dir / "evaluation_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     rank = int(os.environ.get("RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     engine, template, device = _build_engine(args)

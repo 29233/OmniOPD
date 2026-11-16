@@ -32,6 +32,12 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 export TORCH_DTYPE="${TORCH_DTYPE:-bfloat16}"
 export AURORA_SAM_CHECKPOINT="${AURORA_SAM_CHECKPOINT:-models/sam_vit_h_4b8939.pth}"
 export AURORA_NUM_SAM_FRAMES="${AURORA_NUM_SAM_FRAMES:-10}"
+# Audited REF-AVS clips have ten stored frames across ten seconds, nominal
+# 1 FPS (per-frame sampling timestamps unavailable).
+export FPS="${FPS:-1.0}" AURORA_VIDEO_FPS="${AURORA_VIDEO_FPS:-${FPS}}"
+export FPS_MAX_FRAMES="${FPS_MAX_FRAMES:-768}"
+export VIDEO_MAX_TOKEN_NUM="${VIDEO_MAX_TOKEN_NUM:-768}"
+export IMAGE_MAX_TOKEN_NUM="${IMAGE_MAX_TOKEN_NUM:-16384}"
 # --- remote SAM IoU service (scripts/grpo/sam_iou_server.py) --------------------
 # Comma-separated URLs, one per service replica; the IoU ORM tries them in
 # order. REQUIRED: with the remote-service refactor the in-process SAM IoU
@@ -41,6 +47,23 @@ export AURORA_NUM_SAM_FRAMES="${AURORA_NUM_SAM_FRAMES:-10}"
 # the intent visible).
 export AURORA_SAM_IOU_URLS="${AURORA_SAM_IOU_URLS:-http://localhost:8877}"
 export AURORA_GRPO_MASK_LOSS="${AURORA_GRPO_MASK_LOSS:-0}"
+export AURORA_GRPO_REWARD_FAIL_OPEN="${AURORA_GRPO_REWARD_FAIL_OPEN:-0}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
+"${PYTHON_BIN}" - <<'PY'
+import json, os, urllib.request
+urls = [s.strip().rstrip("/") for s in os.environ["AURORA_SAM_IOU_URLS"].split(",") if s.strip()]
+errors = []
+for url in urls:
+    try:
+        with urllib.request.urlopen(url + "/health", timeout=3) as response:
+            if response.status == 200 and json.load(response).get("ok") is True:
+                print(f"[grpo] verified SAM IoU service: {url}", flush=True)
+                break
+    except Exception as exc:
+        errors.append(f"{url}: {exc!r}")
+else:
+    raise SystemExit("No healthy SAM IoU reward service; refusing GRPO: " + "; ".join(errors))
+PY
 export ENABLE_AUDIO_OUTPUT=0
 export MAX_PIXELS="${MAX_PIXELS:-200704}"
 export REPORT_TO="${REPORT_TO:-tensorboard}"
@@ -119,6 +142,7 @@ NPROC_PER_NODE="${NPROC_PER_NODE}" \
   --template aurora_qwen2_5_omni \
   --custom_register_path "${ROOT_DIR}/swift_plugin/aurora_qwen2_5_omni.py" \
   --external_plugins "${ROOT_DIR}/swift_plugin/aurora_grpo.py" \
+    "${ROOT_DIR}/swift_plugin/sam_checkpoint.py" \
   --reward_funcs aurora_format aurora_class aurora_iou \
   --dataset "${TRAIN_JSONL}" \
   --val_dataset "${VAL_JSONL}" \
@@ -142,6 +166,7 @@ NPROC_PER_NODE="${NPROC_PER_NODE}" \
   --max_steps "${MAX_STEPS}" \
   --num_train_epochs "${NUM_TRAIN_EPOCHS}" \
   --max_length 4096 \
+  --max_pixels "${MAX_PIXELS}" \
   --learning_rate "${LEARNING_RATE}" \
   --logging_steps 1 \
   --save_steps "${SAVE_STEPS}" \
@@ -154,6 +179,7 @@ NPROC_PER_NODE="${NPROC_PER_NODE}" \
   --dataset_num_proc 1 \
   --split_dataset_ratio 0 \
   --remove_unused_columns false \
+  --callbacks aurora_sam_checkpoint \
   --report_to "${REPORT_TO}" \
   --add_version "${ADD_VERSION}" \
   --output_dir "${OUTPUT_DIR}" \

@@ -90,9 +90,10 @@ def _load_sam_stack(device: str) -> Tuple[torch.nn.Module, torch.nn.Module]:
         sam.mask_decoder.load_state_dict(torch.load(dec_w, map_location="cpu"))
         print(f"[sam-server] loaded mask_decoder weights: {dec_w}")
     else:
-        print("[sam-server] WARNING: no mask_decoder weights given; using "
-              "the ViT-H checkpoint's decoder (Stage-0). Pass "
-              "AURORA_MASK_DECODER_WEIGHTS if Stage-1 trained it.")
+        raise FileNotFoundError(
+            "AURORA_MASK_DECODER_WEIGHTS is required: the base SAM decoder "
+            "does not represent the trained Stage-1 reward model"
+        )
     projector = projector.to(device)
     return sam, projector
 

@@ -142,6 +142,12 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 export TORCH_DTYPE="${TORCH_DTYPE:-bfloat16}"
 export AURORA_SAM_CHECKPOINT="${AURORA_SAM_CHECKPOINT:-models/sam_vit_h_4b8939.pth}"
 export AURORA_NUM_SAM_FRAMES="${AURORA_NUM_SAM_FRAMES:-10}"
+# REF-AVS audit: ten stored frames per approximately ten-second clip
+# (nominal 1 FPS; exact timestamps were not recorded).
+export FPS="${FPS:-1.0}" AURORA_VIDEO_FPS="${AURORA_VIDEO_FPS:-${FPS}}"
+export FPS_MAX_FRAMES="${FPS_MAX_FRAMES:-768}"
+export VIDEO_MAX_TOKEN_NUM="${VIDEO_MAX_TOKEN_NUM:-768}"
+export IMAGE_MAX_TOKEN_NUM="${IMAGE_MAX_TOKEN_NUM:-16384}"
 export ENABLE_AUDIO_OUTPUT=0
 export MAX_PIXELS="${MAX_PIXELS:-200704}"
 export MAX_LENGTH="${MAX_LENGTH:-4096}"
