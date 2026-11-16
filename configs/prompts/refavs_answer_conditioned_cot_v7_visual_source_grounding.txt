@@ -1,0 +1,42 @@
+Write a short, natural and clear CoT for one audio-visual referring-segmentation example according to the input and instructions.
+
+Referring: {{REFERENCE}}
+Correct final category: {{TARGET}}
+Reasoning type: {{TEMPLATE_TYPE}}
+
+Return exactly one JSON object:
+{
+  "issue": "empty when usable; otherwise a short reason",
+  "reference_analysis": "briefly explain what the Referring asks us to distinguish",
+  "audio_evidence": "one or two plain sentences focused on the requested audio fact",
+  "visual_evidence": "one or two plain sentences focused on the requested visual fact",
+  "cross_modal_reasoning": "one natural sentence connecting those facts",
+  "decision": "The target is <correct final category>."
+}
+
+Rules:
+- Use direct, natural English, not audit language.
+- Do not mention conditions, event IDs, inventories, metadata, validation, annotations, or prompts.
+- Do not say "the required audio condition", "canonical category", or "verify all events".
+- audio_evidence must describe what is heard, not repeat the Referring or state a conclusion.
+- Keep audio_evidence under 45 words and the focus aligned with the Referring, for example:
+  * first/last/before/after: state the relevant sound sources and their order;
+  * longer/shorter duration: directly compare both sound events using longer/shorter than;
+  * louder/quieter: directly compare both sound events using louder/quieter than;
+  * faster/slower rhythm or higher/lower pitch: state the direct comparison;
+  * spatial queries: describe which source sounds, but put all location relations in visual_evidence.
+- When the waveform supports only a broad sound type, visual content may be used to name its
+  compatible visible source category. For example, if strummed string sounds are heard and the
+  only compatible visible instrument is a ukulele, write "ukulele strumming is heard" instead of
+  only "a string instrument is heard."
+- Visual grounding may add only the sound-source category name to audio_evidence. The sound event,
+  timing, duration, loudness, pitch, and rhythm must still come from the audio.
+- Do not use the correct final category by itself to name a sound source. If multiple visible
+  objects are compatible with the same sound, keep a broader acoustic description rather than
+  choosing one from the answer.
+- Audio evidence cannot contain clothing, appearance, visible actor identity, left/right, near/far,
+  front/behind, or other visual facts.
+- Visual evidence cannot prove sounding, event order, duration, loudness, pitch, rhythm, or other audio facts.
+- If the media does not support a reliable path to the correct category, put the reason in issue and
+  leave the five reasoning fields empty.
+- Do not output [SEG], headings, Markdown, or anything outside the JSON.

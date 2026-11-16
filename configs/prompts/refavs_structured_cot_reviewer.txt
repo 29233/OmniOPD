@@ -1,0 +1,94 @@
+Act as a strict quality reviewer for a staged chain of thought used to train an
+audio-visual referring segmentation model. Review the latest draft against the
+reference, canonical target, source CoT, and supplied media. Do not rewrite the
+draft.
+
+Reference:
+{{REFERENCE}}
+
+Canonical target:
+{{TARGET}}
+
+Template type:
+{{TEMPLATE_TYPE}}
+
+Source CoT:
+{{SOURCE_COT}}
+
+Latest staged CoT JSON:
+{{STRUCTURED_COT}}
+
+Return exactly one JSON object with this schema:
+{
+  "reference_conditions": ["one atomic condition"],
+  "condition_checks": [
+    {
+      "condition": "the same atomic condition",
+      "covered": true,
+      "evidence_stage": "one exact value from: audio_evidence, visual_evidence, cross_modal_reasoning, none",
+      "evidence_quote": "exact supporting substring copied from that evidence stage, or empty when uncovered",
+      "reason": "why the evidence does or does not establish the condition"
+    }
+  ],
+  "stage_assignment_ok": true,
+  "decision_supported": true,
+  "evidence_specificity_ok": true,
+  "unsupported_claims": [],
+  "pass": true,
+  "issues": []
+}
+
+Review rules:
+- Split the reference into every condition needed to identify the instance:
+  semantic head/category, appearance/action, negation, sounding or silent
+  status, spatial relation and anchor, temporal order, continuity, duration,
+  loudness, pitch, rhythm, and superlative/comparative constraints.
+- For every audio-related template, split the reference into at least two
+  atomic conditions: an acoustic condition supported directly by
+  audio_evidence and a visual identity/action/spatial condition supported
+  directly by visual_evidence.
+- Every reference condition must have a corresponding condition_checks entry.
+- A stage must provide direct, specific evidence, not merely restate the
+  reference. "A drum set is visible" does not establish which drum is biggest;
+  the evidence must compare the candidate drums or identify the visibly largest
+  one. General knowledge that a bass drum is usually largest is insufficient.
+- For every covered condition, evidence_quote must be copied verbatim from the
+  named evidence stage. Do not quote reference_analysis or decision as evidence.
+- cross_modal_reasoning may explain the binding only after its acoustic and
+  visual premises have separate checks. It cannot be the sole evidence for a
+  sounding, action, identity, appearance, anchor, or spatial condition.
+- For a covered condition, evidence_stage must be exactly audio_evidence,
+  visual_evidence, or cross_modal_reasoning. Never cite reference_analysis or
+  decision. For an uncovered condition, use evidence_stage="none" and an empty
+  evidence_quote.
+- Evidence for one object cannot establish a property of another object. A
+  guitar sound does not establish that an accordion is sounding.
+- First/last, before/after, longest/shortest, louder/quieter, highest/lowest,
+  continuous/intermittent, and biggest/smallest require an explicit comparison
+  or observation at the requested level.
+- When several same-category instances are visible, the evidence must uniquely
+  identify which instance satisfies the comparison or relation. "One drum is
+  visibly the largest" is insufficient because it does not identify that drum;
+  the evidence must distinguish it from the other drums by a visible location,
+  role, or appearance supported by the media.
+- For an audio-related template, audio facts belong in audio_evidence, visual
+  facts belong in visual_evidence, and cross_modal_reasoning must combine them.
+  For a non-audio template, the draft must not rely on audio.
+- Reject any audio_evidence that contains a visual spatial relation such as
+  left/right/behind/near, a visual appearance such as long-haired, or an actor
+  attribution such as "played by the man." Audio may establish a sound or
+  acoustic property; visual_evidence must establish who performs an action and
+  where objects are located.
+- Reject anonymous acoustic evidence such as "a sound is produced by an
+  object." For a cross-modal binding to a specific visible target, the audio
+  stage must identify the audible source/category or a distinctive audible
+  event that the visual stage can independently bind to. The conclusion cannot
+  introduce that identity for the first time.
+- The decision must follow from the evidence and preserve the canonical target.
+- List any factual claim that is unsupported by both the supplied media and the
+  source CoT in unsupported_claims. Unnecessary brands, object subtypes,
+  clothing, colors, positions, actions, or acoustic properties are failures.
+- Compute pass conservatively. pass may be true only when every condition is
+  covered, all three boolean checks are true, and both unsupported_claims and
+  issues are empty.
+- Return JSON only, without Markdown or additional commentary.

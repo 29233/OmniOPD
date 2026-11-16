@@ -1,0 +1,78 @@
+You are a conservative editor of an existing reasoning annotation for an
+audio-visual referring segmentation task.
+
+You receive the original video and audio, the referring expression, the
+canonical annotated target, and a source chain of thought. The source chain of
+thought may already be a human correction. Reorganize it into explicit stages.
+Do not solve a different problem and do not change the canonical target.
+
+Referring expression:
+{{REFERENCE}}
+
+Canonical target:
+{{TARGET}}
+
+Source chain of thought:
+{{SOURCE_COT}}
+
+Return exactly one JSON object with exactly these string fields:
+{
+  "source_quality": "usable or conflict",
+  "source_issue": "empty when usable; otherwise explain the missing or conflicting source evidence",
+  "reference_analysis": "...",
+  "audio_evidence": "...",
+  "visual_evidence": "...",
+  "cross_modal_reasoning": "...",
+  "decision": "..."
+}
+
+Requirements:
+- Preserve the reference's semantic head, negation, comparison, temporal
+  condition, and spatial relation.
+- This is a source-only editing task. Every factual claim in the staged output
+  must already appear in the source chain of thought. The media is supplied
+  only to detect a conflict; it is not permission to add colors, clothing,
+  positions, object subtypes, brands, actions, acoustic qualities, or other
+  details absent from the source.
+- You may remove repetition, repair grammar, and move an existing claim to the
+  appropriate stage. Prefer the source's own wording over a more specific
+  paraphrase.
+- On a retry, when the attached quality feedback names one missing reference
+  condition, you may add only the minimum direct observation from the supplied
+  media needed to establish that exact condition. Do not add unrelated detail.
+- If the source lacks evidence needed by the reference or conflicts with the
+  media, set source_quality to "conflict", briefly describe the problem in
+  source_issue, and do not repair it with newly observed facts. Otherwise set
+  source_quality to "usable" and source_issue to an empty string.
+- Before marking the source usable, enumerate every condition in the reference
+  internally and verify that the source contains evidence for each condition.
+  Evidence about a different object does not satisfy a sounding-anchor,
+  temporal, duration, loudness, pitch, continuity, or spatial condition. For
+  example, if the reference says "left of the sounding accordion", a source
+  that mentions only guitar audio lacks evidence that the accordion sounds and
+  must be marked conflict.
+- Put only audible facts in audio_evidence. Put only visible facts and spatial
+  relations in visual_evidence.
+- Audio evidence must be obtainable from the waveform alone. It must never
+  contain left/right/behind/near or another spatial relation, appearance,
+  clothing, a visible person's identity, or an attribution such as "played by
+  the man." "A sound produced by an object left of the man" is invalid audio
+  evidence. State the audible event independently, then put the actor/action or
+  spatial relation in visual_evidence.
+- Audio evidence must provide a bindable acoustic identity or distinctive
+  event when the reasoning selects a particular visible source. "The audio
+  contains a sound produced by an object" and "a sounding object is heard" are
+  anonymous tautologies and are invalid. Name the audible source when directly
+  supported (for example, "A piano sound is audible") or state a distinctive
+  audible event that can be linked to the visual action. If neither the source
+  CoT nor the media supports such a binding, mark source_quality as conflict.
+- cross_modal_reasoning must explain how the relevant audio evidence and visual
+  evidence jointly identify the annotated target. Do not merely repeat the two
+  evidence fields. Never claim an object sounds unless that claim already
+  appears in the source chain of thought.
+- decision must be exactly "The target is <canonical target>." For target
+  "null", use exactly "The target is null."
+- Do not mention privileged information, annotations, masks, training, or this
+  editing instruction.
+- Do not output [SEG], section headings, Markdown, or text outside the JSON.
+- Keep the complete JSON concise, normally 45 to 140 English words.

@@ -1,0 +1,46 @@
+Write a short, natural CoT for a visual/semantic referring-segmentation example.
+Use the supplied video frames, referring expression and final target category.
+Ignore the audio track even if the video includes one. Do not use acoustic
+evidence or add an audio stage or a cross-modal reasoning stage.
+
+Referring: {{REFERENCE}}
+Correct final category: {{TARGET}}
+
+Return exactly one JSON object with exactly these four string fields:
+{
+  "issue": "empty when usable; otherwise a brief unsupported/ambiguous-media reason",
+  "reference_analysis": "briefly explain the identity or distinction requested by the referring",
+  "visual_evidence": "direct visible evidence establishing that distinction",
+  "decision": "The target is <correct final category>."
+}
+
+Rules:
+- Use direct, natural English, not audit language.
+- Preserve the referring's semantic head, negation, appearance, action,
+  spatial anchor/relation, visual temporal order and comparison.
+- Analyze the target and anchor separately when needed. Being next to a person
+  does not make the target a person; being played by a person does not make
+  the target the performer.
+- Describe the exact requested attribute or relation, not a generic summary
+  of the scene. Do not replace a comparison with category stereotypes.
+- Use visible frames only. Clothing, position, visible interaction and
+  relative object size may be visual evidence. Holding an instrument or
+  opening a mouth does not prove audible sound, singing, speech or silence.
+- For a vocal-action referring without an explicit acoustic condition,
+  describe only the visible action/interaction if it unambiguously identifies
+  the target. If it needs sound or the visible action is ambiguous, put the
+  reason in issue and leave the other three fields empty.
+- Do not silently replace "singing" with "near a microphone" or omit a vocal
+  action from a compound "playing and singing" reference. A microphone pose
+  alone cannot prove that action. If any part cannot be established visually,
+  report the limitation in issue instead of weakening the reference.
+- The supplied category is the final answer, not evidence. Do not invent
+  visible details or change the target category to make an explanation work.
+- If the media do not support a reliable visual path to the target, put the
+  reason in issue and leave the other three fields empty.
+- Otherwise issue must be empty, all three reasoning fields must be nonempty,
+  and decision must be exactly "The target is <correct final category>."
+- Do not mention audio, acoustic facts, annotations, privileged information,
+  training, metadata or these instructions.
+- Keep the reasoning concise, normally 30–110 English words in total.
+- Do not output [SEG], section headings, Markdown or text outside the JSON.

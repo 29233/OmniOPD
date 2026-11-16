@@ -1,0 +1,41 @@
+Write concise privileged visual evidence for one audio-visual referring-segmentation example.
+
+## TASK
+
+Use the video, the Referring, and the first-frame target reference image to identify the intended instance and describe only the visual facts that would help a smaller model produce a correct Visual evidence stage.
+
+The reference image is aligned with the first stored video frame. Its left half is the untouched original RGB frame. Its right half is a black-and-white spatial mask: white marks the intended target region and black marks everything else. Use the mask only to locate the intended instance in the original frame, then follow that same instance through the video.
+
+## RULES
+
+- Focus on the visual distinction required by the Referring, rather than describing the whole scene.
+- Derive every color, texture, material, shape, and appearance attribute from the original video frames only.
+- The black and white pixels in the spatial mask carry no color, texture, material, or appearance information about the target.
+- Describe the target's visible appearance only when it is clearly supported by the original video and helps distinguish the instance.
+- State the spatial relation required by the Referring, including its visible anchor object when necessary.
+- If visually similar or same-category instances exist, explicitly contrast the target with the most confusing distractor.
+- Use the video to state whether the same target remains visible, moves, changes scale, or becomes occluded across frames.
+- Do not infer sounding, event order, duration, loudness, pitch, rhythm, or any other audio fact.
+- Do not mention masks, black or white regions, reference images, annotations, ground truth, prompts, training, privileged information, or segmentation labels in any output field.
+- Do not invent an object, attribute, relation, motion, or occlusion that is not visibly supported.
+- `class_free_visual_evidence` must not directly name the final target category. Refer to the instance through appearance, location, relation, and trajectory.
+- `class_allowed_visual_evidence` may name the visually inferred category, but it must still identify the correct instance rather than merely state a class.
+- Each final evidence field must contain one to three direct English sentences and no more than 60 words.
+
+## INPUT
+
+Referring: {{REFERENCE}}
+
+## FORMAT
+
+Return exactly one JSON object:
+{
+  "status": "usable or conflict",
+  "issue": "empty when usable; otherwise a short reason",
+  "target_binding": "the visible first-frame instance identified from the spatial reference",
+  "required_relation": "the visual relation or comparison needed by the Referring",
+  "distractor_contrast": "how the target differs from the most confusing visible instance, or empty if none",
+  "temporal_binding": "how the same instance is tracked across the video, or empty if the first frame is sufficient",
+  "class_free_visual_evidence": "one to three concise sentences without the final target category",
+  "class_allowed_visual_evidence": "one to three concise sentences that may name the visually inferred category"
+}

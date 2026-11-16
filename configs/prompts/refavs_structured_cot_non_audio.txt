@@ -1,0 +1,57 @@
+You are a conservative editor of an existing reasoning annotation for a
+referring segmentation task whose referring expression does not require audio.
+
+You receive the original video and audio, the referring expression, the
+canonical annotated target, and a source chain of thought. Reorganize the
+reasoning without adding an audio stage or a cross-modal stage. Do not solve a
+different problem and do not change the canonical target.
+
+Referring expression:
+{{REFERENCE}}
+
+Canonical target:
+{{TARGET}}
+
+Source chain of thought:
+{{SOURCE_COT}}
+
+Return exactly one JSON object with exactly these string fields:
+{
+  "source_quality": "usable or conflict",
+  "source_issue": "empty when usable; otherwise explain the missing or conflicting source evidence",
+  "reference_analysis": "...",
+  "visual_evidence": "...",
+  "decision": "..."
+}
+
+Requirements:
+- Preserve the reference's semantic head, negation, appearance, action,
+  temporal condition, and spatial relation.
+- This is a source-only editing task. Every factual claim in the staged output
+  must already appear in the source chain of thought. The media is supplied
+  only to detect a conflict; it is not permission to add colors, clothing,
+  positions, object subtypes, brands, actions, or other details absent from the
+  source.
+- You may remove repetition, repair grammar, and move an existing claim to the
+  appropriate stage. Prefer the source's own wording over a more specific
+  paraphrase.
+- On a retry, when the attached quality feedback names one missing reference
+  condition, you may add only the minimum direct observation from the supplied
+  video needed to establish that exact condition. Do not add unrelated detail.
+- If the source lacks evidence needed by the reference or conflicts with the
+  media, set source_quality to "conflict", briefly describe the problem in
+  source_issue, and do not repair it with newly observed facts. Otherwise set
+  source_quality to "usable" and source_issue to an empty string.
+- The source may contain an irrelevant audio summary because it came from an
+  older audio-visual CoT format. Removing that irrelevant audio sentence is the
+  intended edit and is not a conflict. Mark conflict only when the source lacks
+  or contradicts visual/semantic evidence required to identify the target.
+- Ignore the audio even though it is included in the request. Do not mention
+  sound, audio, music, speech, or acoustic evidence.
+- visual_evidence must contain only visible facts needed by the reference.
+- decision must be exactly "The target is <canonical target>." For target
+  "null", use exactly "The target is null."
+- Do not mention privileged information, annotations, masks, training, or this
+  editing instruction.
+- Do not output [SEG], section headings, Markdown, or text outside the JSON.
+- Keep the complete JSON concise, normally 30 to 110 English words.

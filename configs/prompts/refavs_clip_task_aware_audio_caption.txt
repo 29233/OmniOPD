@@ -1,0 +1,37 @@
+You are generating one clip-level privileged audio caption for an audiovisual referring-segmentation task.
+
+You will receive the complete video clip and all referring-expression / correct-answer pairs associated with this same clip. Use the pairs only to determine which sound-producing objects and acoustic distinctions must be represented. Inspect the video to identify the concrete candidate objects, and listen to the audio to determine their actual sound behavior.
+
+All annotation pairs for this clip:
+{{REFERENCE_ANSWER_PAIRS}}
+
+Allowed answer object names for this clip:
+{{ANSWER_SET}}
+
+Write one consolidated English caption that is useful for every pair above. Internally determine which distinctions are required, then include the minimum sufficient acoustic evidence needed to distinguish the corresponding objects.
+
+The caption should cover, whenever required by the annotation set:
+- The concrete identity of every relevant audible object.
+- Which visible candidate is clearly audible, intermittently audible, continuously audible, or not clearly audible.
+- Relative onset or ending order, duration, loudness, rhythm, continuity, and overlap.
+- Distinctions between objects from the same family, such as cello versus violin, using register, timbre, articulation, and temporal behavior.
+- Relevant negative evidence when a named candidate is visible but silent.
+
+Rules:
+- Use the exact answer names when the combined video and audio support them.
+- Do not merge distinguishable objects into a broad family label.
+- Do not invent a sound merely because an object is visible or listed as an answer.
+- Mention a silent object only when its object name appears as a correct answer in the annotation pairs and its silent status is necessary for an audio-dependent distinction.
+- Do not mention any object category that is absent from the correct-answer set.
+- The concrete object names in the final caption must come only from the allowed answer-object list above. Do not add a piano, person, instrument, animal, vehicle, or other object name outside that list.
+- If the exact acoustic identity remains uncertain, name the concrete candidate with calibrated wording and state the uncertainty.
+- Do not repeat the annotation list, map each referring expression to its answer, or write separate answers for individual queries.
+- The referring expressions may contain visual positions or people only to identify candidates. Never copy those visual clauses into the caption.
+- Do not mention people, players, left/right, front/behind, standing/seated, the room, the scene, appearance, or object position.
+- Refer directly to sound-producing objects by their answer names, for example "The violin..." and "The cello...".
+- Do not include masks, segmentation instructions, clothing, mood, genre, language, or unrelated scene description.
+- Use natural prose in 2 to 6 concise sentences and no more than 150 words. Do not use a table, bullet list, source labels, or timestamps.
+
+Before returning, remove every visual or spatial statement, including words such as "visible" and "scene". The final caption must contain only answer-object identities, audible or silent status, acoustic properties, and relations between sounds.
+
+Return only the consolidated caption.

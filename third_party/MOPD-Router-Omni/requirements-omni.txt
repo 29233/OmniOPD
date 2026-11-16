@@ -1,0 +1,10 @@
+# Read-only reuse of the existing CUDA stack; installed into a NEW venv overlay.
+numpy==1.26.4
+ray==2.49.2
+hydra-core==1.3.2
+omegaconf==2.3.0
+tensordict==0.8.3
+torchdata==0.11.0
+codetiming==1.4.0
+opencv-python-headless==4.11.0.86
+transformers-stream-generator==0.0.5
