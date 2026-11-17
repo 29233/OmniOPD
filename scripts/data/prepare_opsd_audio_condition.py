@@ -13,7 +13,7 @@ import numpy as np
 import soundfile as sf
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def seed_for(source: Path, seed: int) -> int:

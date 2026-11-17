@@ -1,18 +1,19 @@
 """AURORA SAM IoU microservice — HTTP server side.
 
 Runs on the dedicated SAM node (another V100 group). The GRPO training
-cluster sends, per completion: the [SEG] hidden state (2048 floats) plus the
-frame/mask paths. This service loads SAM ViT-H + the Stage-1-trained
-``text_hidden_fcs`` projector + ``mask_decoder`` weights, runs
+cluster sends, per completion: the [SEG] hidden state (e.g., 2048 floats for 3B
+or 3584 for 7B) plus the frame/mask paths. This service loads SAM ViT-H + the
+Stage-1-trained ``text_hidden_fcs`` projector + ``mask_decoder`` weights, runs
 projector -> SAM -> postprocess, and returns the frame-averaged IoU against
 the GT masks.
 
-Path contract: frames/GT masks live on shared NFS (/mnt/tbo), so the service
-resolves the same absolute paths the training side sends. No image bytes
-cross the wire — only the 8KB hidden state per request.
+Path contract: frames/GT masks live on a shared filesystem visible to both
+trainer and SAM service nodes, so the service resolves the same absolute paths
+the training side sends. No image bytes cross the wire — only the [SEG] hidden
+state per request.
 
 Endpoints:
-    POST /iou        {"hidden": [2048 floats],
+    POST /iou        {"hidden": [<floats>],
                       "sam_frame_paths": [...], "mask_paths": [...],
                       "num_frames": 10}
     GET  /health
@@ -31,29 +32,92 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-if _REPO_ROOT not in os.path.join(os.pathsep, os.environ.get("PYTHONPATH", "")):
-    os.environ["PYTHONPATH"] = _REPO_ROOT + os.pathsep + os.environ.get("PYTHONPATH", "")
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _add_import_paths() -> None:
+    root = _repo_root()
+    for candidate in (root, root / "third_party/sam2"):
+        if candidate.is_dir() and str(candidate) not in sys.path:
+            sys.path.insert(0, str(candidate))
+
+
+_add_import_paths()
 
 from swift_plugin.segmentation import (  # noqa: E402
     load_gt_masks,
     preprocess_sam_frames,
 )
 
-_DEFAULT_NUM_FRAMES = int(os.environ.get("AURORA_NUM_SAM_FRAMES", "10"))
+_DEFAULT_NUM_FRAMES = int(os.environ.get("AURORA_NUM_SAM_FRAMES") or "10")
+_DEFAULT_PROJECTOR_HIDDEN_SIZE = int(os.environ.get("AURORA_PROJECTOR_HIDDEN_SIZE") or "2048")
 
 
-def _load_sam_stack(device: str) -> Tuple[torch.nn.Module, torch.nn.Module]:
+def _resolve_sam_checkpoint(raw_path: str) -> str:
+    candidate = Path(raw_path)
+    if candidate.is_file() or candidate.is_absolute():
+        return str(candidate)
+    repo_relative = _repo_root() / candidate
+    if repo_relative.is_file():
+        return str(repo_relative)
+    return str(candidate)
+
+
+def _build_projector_from_state(
+    proj_state: dict,
+    projector_hidden_size: int,
+    input_hidden_size: Optional[int] = None,
+) -> torch.nn.Module:
+    if projector_hidden_size <= 0:
+        raise ValueError(f"projector_hidden_size must be positive, got {projector_hidden_size}")
+    has_layer_norm = "0.weight" in proj_state and proj_state["0.weight"].ndim == 1
+    first_linear_key = "1.weight" if has_layer_norm else "0.weight"
+    if first_linear_key not in proj_state:
+        raise ValueError(f"Unexpected projector state_dict keys: {sorted(proj_state)}")
+    weight_out, weight_in = proj_state[first_linear_key].shape
+    if weight_out != projector_hidden_size:
+        raise ValueError(
+            f"Projector checkpoint hidden size is {weight_out}, but configured "
+            f"projector_hidden_size={projector_hidden_size}. Pass --projector-hidden-size {weight_out} "
+            f"or set AURORA_PROJECTOR_HIDDEN_SIZE={weight_out}."
+        )
+    if input_hidden_size is not None and input_hidden_size != weight_in:
+        raise ValueError(
+            f"Projector checkpoint input size is {weight_in}, but configured "
+            f"input_hidden_size={input_hidden_size}."
+        )
+    layers: List[torch.nn.Module] = []
+    if has_layer_norm:
+        layers.append(torch.nn.LayerNorm(weight_in))
+    layers.extend([
+        torch.nn.Linear(weight_in, projector_hidden_size),
+        torch.nn.ReLU(inplace=True),
+        torch.nn.Linear(projector_hidden_size, 256),
+        torch.nn.Dropout(0.0),
+    ])
+    projector = torch.nn.Sequential(*layers)
+    projector.load_state_dict(proj_state, strict=True)
+    return projector
+
+
+def _load_sam_stack(
+    device: str,
+    projector_hidden_size: Optional[int] = None,
+    input_hidden_size: Optional[int] = None,
+) -> Tuple[torch.nn.Module, torch.nn.Module]:
     """SAM ViT-H + projector; Stage-1 trained weights if provided."""
-    sam_checkpoint = os.environ.get(
-        "AURORA_SAM_CHECKPOINT",
-        "models/sam_vit_h_4b8939.pth",
+    sam_checkpoint = _resolve_sam_checkpoint(
+        os.environ.get("AURORA_SAM_CHECKPOINT", "models/sam_vit_h_4b8939.pth")
     )
     from model.segment_anything import build_sam_vit_h
 
@@ -62,26 +126,33 @@ def _load_sam_stack(device: str) -> Tuple[torch.nn.Module, torch.nn.Module]:
     sam.eval()
     sam = sam.to(device)
 
-    hidden_size = 2048  # Qwen2.5-Omni-3B/7B thinker text hidden size
-    projector = torch.nn.Sequential(
-        torch.nn.Linear(hidden_size, hidden_size),
-        torch.nn.ReLU(inplace=True),
-        torch.nn.Linear(hidden_size, 256),
-        torch.nn.Dropout(0.0),
+    resolved_hidden_size = (
+        int(os.environ.get("AURORA_PROJECTOR_HIDDEN_SIZE") or "2048")
+        if projector_hidden_size is None
+        else int(projector_hidden_size)
     )
-    projector.requires_grad_(False)
-    projector.eval()
+    if input_hidden_size is None:
+        env_in = os.environ.get("AURORA_INPUT_HIDDEN_SIZE", "").strip()
+        if env_in:
+            input_hidden_size = int(env_in)
 
     proj_w = os.environ.get("AURORA_PROJECTOR_WEIGHTS", "")
     if proj_w and os.path.isfile(proj_w):
-        projector.load_state_dict(torch.load(proj_w, map_location="cpu"))
-        print(f"[sam-server] loaded projector weights: {proj_w}")
+        proj_state = torch.load(proj_w, map_location="cpu")
+        projector = _build_projector_from_state(
+            proj_state,
+            projector_hidden_size=resolved_hidden_size,
+            input_hidden_size=input_hidden_size,
+        )
+        print(f"[sam-server] loaded projector weights: {proj_w} (hidden={resolved_hidden_size})")
     else:
         raise FileNotFoundError(
             "AURORA_PROJECTOR_WEIGHTS not set or missing — the projector must "
             "carry Stage-1 trained weights or IoU rewards are meaningless. "
             "Export with scripts/utils/export_sam_weights.py first."
         )
+    projector.requires_grad_(False)
+    projector.eval()
 
     dec_w = os.environ.get("AURORA_MASK_DECODER_WEIGHTS", "")
     if dec_w and os.path.isfile(dec_w):
@@ -184,9 +255,25 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8877)
+    parser.add_argument(
+        "--projector-hidden-size",
+        type=int,
+        default=_DEFAULT_PROJECTOR_HIDDEN_SIZE,
+        help="Text-to-SAM projector hidden width (default: AURORA_PROJECTOR_HIDDEN_SIZE or 2048).",
+    )
+    parser.add_argument(
+        "--input-hidden-size",
+        type=int,
+        default=None,
+        help="Optional expected input [SEG] hidden dimension (inferred from weights if omitted).",
+    )
     args = parser.parse_args()
 
-    _SAM, _PROJECTOR = _load_sam_stack(_DEVICE)
+    _SAM, _PROJECTOR = _load_sam_stack(
+        _DEVICE,
+        projector_hidden_size=args.projector_hidden_size,
+        input_hidden_size=args.input_hidden_size,
+    )
     server = ThreadingHTTPServer((args.host, args.port), _Handler)
     print(f"[sam-server] listening on {args.host}:{args.port} (device={_DEVICE})", flush=True)
     server.serve_forever()

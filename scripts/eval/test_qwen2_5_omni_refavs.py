@@ -21,7 +21,7 @@ import tempfile
 import time
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, MutableMapping
 
 import torch
 
@@ -72,7 +72,8 @@ def _check_task_prompt_style(train_source: Path, test_sources: dict[str, Path]) 
 
 
 def _add_import_paths() -> None:
-    # ONLY the repo root (for swift_plugin). Do NOT add extra swift roots:
+    # Prepend repo root (swift_plugin, scripts, model) and vendored third_party/sam2.
+    # Do NOT add extra swift roots:
     # historically this injected MS_SWIFT_ROOT=third_party/ms-swift
     # (a swift 3.x checkout) AHEAD of the editable-installed ms-swift 4.5.2 in
     # third_party/, mixing 3.x package headers with 4.5.2 submodules in one
@@ -82,13 +83,94 @@ def _add_import_paths() -> None:
     # 4.5.2 metrics). ms-swift now comes from the editable install; MS_SWIFT_ROOT
     # is honored only if explicitly set for a deliberate legacy run.
     root = _repo_root()
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
+    for candidate in (root, root / "third_party/sam2"):
+        if candidate.is_dir() and str(candidate) not in sys.path:
+            sys.path.insert(0, str(candidate))
     swift_root = os.environ.get("MS_SWIFT_ROOT", "")
     if swift_root and swift_root not in sys.path:
         print(f"[warn] MS_SWIFT_ROOT={swift_root} is prepended; this may shadow "
               f"the editable ms-swift 4.5.2 with a legacy checkout.", flush=True)
         sys.path.insert(0, str(swift_root))
+
+
+def _configure_projector_environment(
+    checkpoint: Path,
+    environ: MutableMapping[str, str] | None = None,
+) -> Dict[str, Any]:
+    """Propagate checkpoint projector metadata and validate SAM/SAM2 backend selection."""
+    env = os.environ if environ is None else environ
+    projector_config_path = Path(checkpoint) / "aurora_projector_config.json"
+    if not projector_config_path.is_file():
+        return {}
+    projector_config = json.loads(projector_config_path.read_text(encoding="utf-8"))
+    architecture_environment = {
+        "AURORA_PROJECTOR_HIDDEN_SIZE": str(projector_config["projector_hidden_size"]),
+        "AURORA_PROJECTOR_LAYER_NORM": "1" if projector_config.get("layer_norm") else "0",
+        "AURORA_VIDEO_FPS": str(projector_config["model_timeline_fps"]),
+        "AURORA_NUM_SAM_FRAMES": str(projector_config["sam_frames"]),
+    }
+    for key, value in architecture_environment.items():
+        configured = env.get(key)
+        if configured is not None and configured != value:
+            raise ValueError(
+                f"Checkpoint architecture mismatch: {key}={configured!r}, expected {value!r} "
+                f"from {projector_config_path}"
+            )
+        env[key] = value
+    backend = str(projector_config.get("backend") or "").strip().lower()
+    if backend == "sam2_video_memory":
+        configured_backend = (env.get("AURORA_SEG_BACKEND") or "").strip()
+        if configured_backend and configured_backend.lower() != "sam2":
+            raise ValueError(
+                f"Checkpoint architecture mismatch: AURORA_SEG_BACKEND={configured_backend!r}, "
+                f"expected 'sam2' for backend='sam2_video_memory' from {projector_config_path}"
+            )
+        env["AURORA_SEG_BACKEND"] = "sam2"
+        sam2_config = projector_config.get("sam2_config")
+        if sam2_config and not (env.get("AURORA_SAM2_CONFIG") or "").strip():
+            env["AURORA_SAM2_CONFIG"] = str(sam2_config)
+    elif backend == "sam":
+        configured_backend = (env.get("AURORA_SEG_BACKEND") or "").strip()
+        if configured_backend and configured_backend.lower() != "sam":
+            raise ValueError(
+                f"Checkpoint architecture mismatch: AURORA_SEG_BACKEND={configured_backend!r}, "
+                f"expected 'sam' from {projector_config_path}"
+            )
+        env["AURORA_SEG_BACKEND"] = "sam"
+    return projector_config
+
+
+def _resolve_sam2_checkpoint(environ: MutableMapping[str, str] | None = None) -> Path | None:
+    """Ensure AURORA_SAM2_CHECKPOINT points to an existing file when using SAM2."""
+    env = os.environ if environ is None else environ
+    if (env.get("AURORA_SEG_BACKEND") or "sam").strip().lower() != "sam2":
+        return None
+    sam2_ckpt = (env.get("AURORA_SAM2_CHECKPOINT") or "").strip()
+    if not sam2_ckpt:
+        sam2_ckpt = (env.get("SAM2_CHECKPOINT") or "").strip()
+        if sam2_ckpt:
+            env["AURORA_SAM2_CHECKPOINT"] = sam2_ckpt
+    if not sam2_ckpt:
+        default_sam2 = _repo_root() / "models/sam2_hiera_large.pt"
+        if default_sam2.is_file():
+            env["AURORA_SAM2_CHECKPOINT"] = str(default_sam2)
+            return default_sam2
+        raise FileNotFoundError(
+            "AURORA_SEG_BACKEND=sam2 requires a SAM2 base checkpoint, but neither "
+            "AURORA_SAM2_CHECKPOINT nor SAM2_CHECKPOINT is set (and default "
+            f"{default_sam2} does not exist). Set AURORA_SAM2_CHECKPOINT=/path/to/sam2_hiera_large.pt."
+        )
+    ckpt_path = Path(sam2_ckpt)
+    if not ckpt_path.is_file():
+        repo_relative = _repo_root() / sam2_ckpt
+        if not ckpt_path.is_absolute() and repo_relative.is_file():
+            env["AURORA_SAM2_CHECKPOINT"] = str(repo_relative)
+            return repo_relative
+        raise FileNotFoundError(
+            f"AURORA_SAM2_CHECKPOINT points to a missing file: {sam2_ckpt!r}. "
+            "Set AURORA_SAM2_CHECKPOINT (or SAM2_CHECKPOINT) to an existing SAM2 checkpoint file."
+        )
+    return ckpt_path
 
 
 def _to_device(value: Any, device: torch.device) -> Any:
@@ -813,6 +895,7 @@ def _evaluate_split(args, engine, template, device, split: str, output_dir: Path
 
 
 def main() -> None:
+    _add_import_paths()
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default=os.environ.get("MODEL_PATH", "models/Qwen2___5-Omni-3B"))
     parser.add_argument("--checkpoint", required=True, help="ms-swift checkpoint directory containing adapter_model.safetensors")
@@ -904,23 +987,8 @@ def main() -> None:
              "directory. Empty (default) = original audio. Missing degraded "
              "files fail the run.")
     args = parser.parse_args()
-    projector_config_path = Path(args.checkpoint) / "aurora_projector_config.json"
-    if projector_config_path.is_file():
-        projector_config = json.loads(projector_config_path.read_text(encoding="utf-8"))
-        architecture_environment = {
-            "AURORA_PROJECTOR_HIDDEN_SIZE": str(projector_config["projector_hidden_size"]),
-            "AURORA_PROJECTOR_LAYER_NORM": "1" if projector_config.get("layer_norm") else "0",
-            "AURORA_VIDEO_FPS": str(projector_config["model_timeline_fps"]),
-            "AURORA_NUM_SAM_FRAMES": str(projector_config["sam_frames"]),
-        }
-        for key, value in architecture_environment.items():
-            configured = os.environ.get(key)
-            if configured is not None and configured != value:
-                raise ValueError(
-                    f"Checkpoint architecture mismatch: {key}={configured!r}, expected {value!r} "
-                    f"from {projector_config_path}"
-                )
-            os.environ[key] = value
+    projector_config = _configure_projector_environment(Path(args.checkpoint))
+    if projector_config:
         print(f"[checkpoint-architecture] {json.dumps(projector_config, sort_keys=True)}", flush=True)
     if args.match_training_settings:
         from scripts.eval.omni_eval_settings import validate_training_settings
@@ -935,8 +1003,14 @@ def main() -> None:
         model_text = f"{args.model} {args.checkpoint}".lower()
         model_name = "qwen2_5_omni_7b" if "7b" in model_text else "qwen2_5_omni_3b"
         args.output_dir = str(_repo_root() / "outputs/eval" / model_name / checkpoint_name)
-    _add_import_paths()
-    os.environ.setdefault("AURORA_SAM_CHECKPOINT", "models/sam_vit_h_4b8939.pth")
+    if (os.environ.get("AURORA_SEG_BACKEND") or "sam").strip().lower() == "sam2":
+        _resolve_sam2_checkpoint()
+    else:
+        default_sam = _repo_root() / "models/sam_vit_h_4b8939.pth"
+        os.environ.setdefault(
+            "AURORA_SAM_CHECKPOINT",
+            str(default_sam) if default_sam.is_file() else "models/sam_vit_h_4b8939.pth",
+        )
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     if args.mask_dir is None:

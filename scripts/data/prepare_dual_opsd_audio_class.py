@@ -5,7 +5,9 @@ import json
 from pathlib import Path
 import sys
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 from scripts.data.prepare_refavs_opsd import class_from_sample_id, has_valid_class_privilege
 
 

@@ -4,7 +4,7 @@
 Generates the STUDENT-side audio for audio-degrade OPSD: the student hears a
 noisy copy, the teacher hears the original (see swift_plugin/aurora_opsd.py
 ``_patch_teacher_audio`` and the ``audio-degrade`` branch of
-scripts/prepare_refavs_opsd.py, which consumes these files via
+scripts/data/prepare_refavs_opsd.py, which consumes these files via
 ``--degraded-audio-name``).
 
 Output: ``media/<vid>/audio_snr{N}db.wav`` next to the original ``audio.wav``
@@ -17,9 +17,9 @@ Determinism: per-file RNG seeded from sha256(f"{seed}:{vid}:{snr_db}"), so
 ``--force`` regeneration is bit-identical.
 
 Usage:
-  python scripts/degrade_refavs_audio.py --snr-db 10            # one level
+  python scripts/data/degrade_refavs_audio.py --snr-db 10       # one level
   for snr in 20 10 5 0; do                                      # full sweep
-    python scripts/degrade_refavs_audio.py --snr-db "$snr"
+    python scripts/data/degrade_refavs_audio.py --snr-db "$snr"
   done
 """
 from __future__ import annotations
@@ -115,7 +115,7 @@ def degrade_one(src: Path, dst: Path, snr_db: float, seed: int) -> dict:
 
 
 def main() -> None:
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--jsonl", action="append", dest="jsonl_paths",

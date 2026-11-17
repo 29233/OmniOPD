@@ -34,7 +34,7 @@ Three teacher privileges are supported:
     audio-degrade privilege is purely acoustic, and the
     ``teacher_audio_paths`` column is both the teacher-side source and the
     dataset-side marker the plugin's consistency guard checks.
-    Degraded files come from scripts/degrade_refavs_audio.py (run it first;
+    Degraded files come from scripts/data/degrade_refavs_audio.py (run it first;
     the ``--degraded-audio-name`` default here mirrors its naming convention).
 ``class-audio-degrade``
     Student hears degraded audio. A single frozen teacher hears original audio
@@ -145,7 +145,7 @@ def convert_file(
                 if not degraded.is_file():
                     missing.append(
                         f"{sample_id}: degraded audio missing: {degraded} "
-                        f"(run scripts/degrade_refavs_audio.py first)")
+                        f"(run scripts/data/degrade_refavs_audio.py first)")
                     continue
                 # Student side: rollout + training encode + eval all read the
                 # row's audios, so rewriting it degrades the whole student path.
@@ -183,7 +183,7 @@ def convert_file(
 
 
 def main() -> None:
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    root = str(Path(__file__).resolve().parents[2])
     parser = argparse.ArgumentParser(description=__doc__)
     data_dir = os.path.join(root, "outputs", "data", "refavs")
     parser.add_argument("--src", default=os.path.join(data_dir, "refavs_full.jsonl"))
@@ -201,7 +201,7 @@ def main() -> None:
         "--degraded-audio-name",
         default="audio_snr10db.wav",
         help="degraded audio filename (audio-degrade only); must match "
-             "scripts/degrade_refavs_audio.py's naming (audio_snr{N}db.wav)",
+             "scripts/data/degrade_refavs_audio.py's naming (audio_snr{N}db.wav)",
     )
     args = parser.parse_args()
 

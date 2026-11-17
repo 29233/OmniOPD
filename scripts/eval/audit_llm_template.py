@@ -17,6 +17,17 @@ from pathlib import Path
 from safetensors import safe_open
 
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _add_import_paths() -> None:
+    root = _repo_root()
+    for candidate in (root, root / "third_party/sam2"):
+        if candidate.is_dir() and str(candidate) not in sys.path:
+            sys.path.insert(0, str(candidate))
+
+
 def read_case(path: Path, index: int) -> dict:
     with path.open(encoding="utf-8") as stream:
         for i, line in enumerate(stream):
@@ -33,6 +44,7 @@ def task_header(row: dict) -> str:
 
 
 def main() -> None:
+    _add_import_paths()
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--model", required=True, type=Path)
     p.add_argument("--checkpoint", required=True, type=Path)
@@ -106,8 +118,9 @@ def main() -> None:
         "template_class": type(template).__name__,
     }
     if args.native_thinker is not None:
-        sys.path.insert(0, str(Path(__file__).resolve().parents[2]
-                               / "third_party/MOPD-Router-Omni"))
+        mopd_root = str(_repo_root() / "third_party/MOPD-Router-Omni")
+        if mopd_root not in sys.path:
+            sys.path.insert(0, mopd_root)
         from transformers import AutoConfig
         from omni_mopd.data import OmniEncoder
 

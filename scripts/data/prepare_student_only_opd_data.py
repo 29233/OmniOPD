@@ -9,10 +9,15 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
 import numpy as np
+
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from scripts.data.prepare_verified_routed_opd_data import (
     allocate_counts, gt_class, probe_score, prompt_only, read_jsonl, sha256,
