@@ -164,6 +164,8 @@ python scripts/data/relocate_media_paths.py \
   --output outputs/data/sft_relocated/structured_cot.jsonl \
   --old-root /original/REFAVS \
   --new-root /data/REFAVS
+# Copy the source SFT manifest.json alongside the relocated JSONL (or pass DATA_MANIFEST=... later).
+cp /restricted/manifests/manifest.json outputs/data/sft_relocated/manifest.json
 
 python scripts/data/relocate_media_paths.py \
   --source /restricted/manifests/refavs_test_s.jsonl \
@@ -201,6 +203,7 @@ attempting a from-scratch data regeneration.
 ### 2. Supervised Fine-Tuning (`scripts/sft/`)
 ```bash
 # Qwen2.5-Omni-7B + SAM2 3-epoch joint SFT (8 GPUs)
+# Expects $DATA_DIR/structured_cot.jsonl and $DATA_DIR/manifest.json (or set DATA_MANIFEST=...)
 MODEL=/path/to/Qwen2___5-Omni-7B \
 SAM2_CHECKPOINT=/path/to/sam2_hiera_large.pt \
 INIT_ADAPTER=/path/to/stage1_initializer_adapter \

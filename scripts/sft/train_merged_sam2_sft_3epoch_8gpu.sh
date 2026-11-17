@@ -56,7 +56,12 @@ export AURORA_SEG_BACKEND=sam2 AURORA_SAM2_CHECKPOINT="$SAM2_CHECKPOINT" AURORA_
 export ENABLE_AUDIO_OUTPUT=0 USE_AUDIO_IN_VIDEO=0 TOKENIZERS_PARALLELISM=false AURORA_CE_WEIGHT=1.0 AURORA_BCE_WEIGHT=2.0 AURORA_DICE_WEIGHT=0.5
 [[ -n "$PYTHON_BIN" && -x "$PYTHON_BIN" ]] || { echo "Missing executable PYTHON_BIN: ${PYTHON_BIN:-<unset>}" >&2; exit 1; }
 [[ -n "$SWIFT_BIN" && -x "$SWIFT_BIN" ]] || { echo "Missing executable SWIFT_BIN: ${SWIFT_BIN:-<unset>}" >&2; exit 1; }
-[[ -f "$MODEL/config.json" && -f "$SAM2_CHECKPOINT" && -f "$TRAIN_JSONL" && -f "$DATA_MANIFEST" && -f "$INIT_ADAPTER/adapter_model.safetensors" ]] || { echo "missing merged SFT input (MODEL/SAM2_CHECKPOINT/TRAIN_JSONL/DATA_MANIFEST/INIT_ADAPTER)" >&2; exit 1; }
+[[ -f "$MODEL/config.json" && -f "$SAM2_CHECKPOINT" && -f "$TRAIN_JSONL" && -f "$INIT_ADAPTER/adapter_model.safetensors" ]] || { echo "missing merged SFT input (MODEL/SAM2_CHECKPOINT/TRAIN_JSONL/INIT_ADAPTER)" >&2; exit 1; }
+if [[ ! -f "$DATA_MANIFEST" ]]; then
+  echo "Missing merged SFT manifest: $DATA_MANIFEST" >&2
+  echo "If you relocated structured_cot.jsonl with relocate_media_paths.py, copy the source manifest.json into $DATA_DIR/ or set DATA_MANIFEST=/path/to/manifest.json." >&2
+  exit 1
+fi
 if [[ -f "$OUTPUT_DIR/completion.json" ]]; then
   echo "merged_sft_already_complete=$OUTPUT_DIR/completion.json"
   exit 0

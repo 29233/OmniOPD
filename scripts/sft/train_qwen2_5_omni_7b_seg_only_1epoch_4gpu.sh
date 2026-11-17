@@ -66,7 +66,8 @@ export EVAL_OUTPUT_ROOT="${EVAL_OUTPUT_ROOT:-${ROOT_DIR}/outputs/eval/qwen2_5_om
 
 # checkpoint-5265 predates the corrected 1-fps timeline experiment. Preserve
 # its training-time timeline so this run changes only the optimization target.
-export AURORA_VIDEO_FPS="${AURORA_VIDEO_FPS:-2.0}"
+export FPS="${FPS:-2.0}"
+export AURORA_VIDEO_FPS="${AURORA_VIDEO_FPS:-${FPS}}"
 export AURORA_SEGMENTATION_ONLY=1
 export AURORA_CE_WEIGHT=0
 export AURORA_BCE_WEIGHT="${AURORA_BCE_WEIGHT:-2.0}"
@@ -75,6 +76,9 @@ export AURORA_NUM_SAM_FRAMES="${AURORA_NUM_SAM_FRAMES:-10}"
 export AURORA_SAM_CHECKPOINT="${AURORA_SAM_CHECKPOINT:-models/sam_vit_h_4b8939.pth}"
 export ENABLE_AUDIO_OUTPUT=0
 export MAX_PIXELS="${MAX_PIXELS:-200704}"
+export MAX_LENGTH="${MAX_LENGTH:-4096}"
+export DATASET_AUDIT="${DATASET_AUDIT:-}"
+export TRAIN_PROMPT_SOURCE="${TRAIN_PROMPT_SOURCE:-}"
 export PYTHONPATH="${ROOT_DIR}/third_party/sam2:${ROOT_DIR}:${PYTHONPATH:-}"
 
 export LEARNING_RATE="${LEARNING_RATE:-1e-5}"
@@ -82,7 +86,7 @@ export GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-2}"
 export MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-512}"
 export MAX_SAMPLES="${MAX_SAMPLES:--1}"
 export EVAL_MAX_SAMPLES="${EVAL_MAX_SAMPLES:--1}"
-export SAVE_MASKS="${SAVE_MASKS:-0}"
+export SAVE_MASKS="${SAVE_MASKS:-1}"
 export REPORT_TO="${REPORT_TO:-tensorboard}"
 
 for required in \
@@ -161,7 +165,7 @@ NPROC_PER_NODE=4 \
   --gradient_accumulation_steps "${GRADIENT_ACCUMULATION_STEPS}" \
   --num_train_epochs 1 \
   --max_steps -1 \
-  --max_length 4096 \
+  --max_length "${MAX_LENGTH}" \
   --max_pixels "${MAX_PIXELS}" \
   --learning_rate "${LEARNING_RATE}" \
   --lr_scheduler_type cosine \
@@ -198,6 +202,17 @@ RUN_NAME="$(basename "$(dirname "${TRAINED_CHECKPOINT}")")_$(basename "${TRAINED
 EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-${EVAL_OUTPUT_ROOT}/${RUN_NAME}}"
 mkdir -p "${EVAL_OUTPUT_DIR}"
 
+if [[ -z "${DATASET_AUDIT}" ]]; then
+  for candidate in \
+    "${ROOT_DIR}/outputs/artifacts/audit.json" \
+    "${ROOT_DIR}/outputs/artifacts/refavs_fps_audit_20261025/audit.json"; do
+    if [[ -f "${candidate}" ]]; then
+      DATASET_AUDIT="${DATASET_AUDIT:-${candidate}}"
+      break
+    fi
+  done
+fi
+
 EVAL_ARGS=(
   "${ROOT_DIR}/scripts/eval/test_qwen2_5_omni_refavs.py"
   --model "${MODEL_PATH}"
@@ -207,9 +222,20 @@ EVAL_ARGS=(
   --splits test_s test_u
   --max-samples "${EVAL_MAX_SAMPLES}"
   --max-new-tokens "${MAX_NEW_TOKENS}"
+  --torch-dtype float16
+  --attn-impl sdpa
+  --max-pixels "${MAX_PIXELS}"
+  --max-length "${MAX_LENGTH}"
+  --train-prompt-source "${TRAIN_PROMPT_SOURCE:-${TRAIN_JSONL}}"
+  --run-sam
 )
+if [[ -n "${DATASET_AUDIT}" ]]; then
+  EVAL_ARGS+=(--dataset-timing-audit "${DATASET_AUDIT}")
+fi
 if [[ "${SAVE_MASKS}" == "0" ]]; then
   EVAL_ARGS+=(--no-save-masks)
+else
+  EVAL_ARGS+=(--save-masks)
 fi
 
 echo "Training complete: ${TRAINED_CHECKPOINT}"
