@@ -106,7 +106,10 @@ class AuroraOnlineVerifiedOPDTrainer(AuroraVerifiedRoutedOPDTrainer):
         messages = []
         for teacher, text in zip(teachers, texts):
             msgs = deepcopy(teacher.messages)
-            msgs[-1] = {"role": "assistant", "content": text}
+            if msgs and msgs[-1].get("role") == "assistant":
+                msgs[-1] = {"role": "assistant", "content": text}
+            else:
+                msgs.append({"role": "assistant", "content": text})
             messages.append(msgs)
         with stop_gradient_policy(self):
             ious = AuroraSAM2MaskIoUORM()(

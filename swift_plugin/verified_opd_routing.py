@@ -151,7 +151,10 @@ def compute_verified_routing(
     strength[licensed] = (
         score[licensed].clamp(min=0, max=max_score) / max_score
     )
-    verified_weight = route_prob * strength
+    # Hard 1-of-K token routing assigns each active token to a single winning
+    # teacher, so its weight should reflect that teacher's verified strength
+    # without being diluted by softmax route_prob when multiple teachers tie.
+    verified_weight = strength
     return {
         "class_license": class_license,
         "iou_license": iou_license,
@@ -261,6 +264,24 @@ def add_verified_reverse_kl_advantage(
         raise ValueError("Student log-probability/completion-mask shapes differ")
     if teacher_logps.shape[0] != old_student_logps.shape[0] or teacher_logps.shape[2] != old_student_logps.shape[1]:
         raise ValueError("Teacher log-probability frame differs from student frame")
+    batch_size, seq_len = completion_mask.shape
+    if base_advantages.ndim == 1:
+        if base_advantages.shape[0] != batch_size:
+            raise ValueError(
+                f"base_advantages batch size {base_advantages.shape[0]} != {batch_size}"
+            )
+        aligned_base_advantages = base_advantages[:, None]
+    elif base_advantages.ndim == 2:
+        if base_advantages.shape[0] != batch_size or base_advantages.shape[1] not in (1, seq_len):
+            raise ValueError(
+                f"base_advantages shape {tuple(base_advantages.shape)} incompatible with "
+                f"completion_mask shape {tuple(completion_mask.shape)}"
+            )
+        aligned_base_advantages = base_advantages
+    else:
+        raise ValueError(
+            f"base_advantages must be 1D or 2D, got {tuple(base_advantages.shape)}"
+        )
     token_route = route_token_teacher(
         selected_masks, routing["verified_weight"], completion_mask
     )
@@ -291,7 +312,7 @@ def add_verified_reverse_kl_advantage(
     # Zero removes *all* verifier-derived policy-gradient advantages. The
     # verifier can still license Teachers, but it must not optimize the pure
     # OPD control through an accidental GRPO reward path.
-    combined = task_reward_coef * base_advantages + kd_advantage
+    combined = task_reward_coef * aligned_base_advantages.float() * completion_mask.float() + kd_advantage
     denominator = completion_mask.float().sum().clamp_min(1)
     active = token_route["any_candidate"]
     active_count = active.sum().clamp_min(1)

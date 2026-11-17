@@ -131,14 +131,24 @@ class AuroraOnlineThreeTeacherJointTrainer(AuroraOnlineVerifiedOPDTrainer):
                     pad_token_id=self.template.tokenizer.pad_token_id,
                 )
         responses = generated[:, input_length:].detach().cpu()
-        texts = [
-            self.template.tokenizer.decode(
-                ids.tolist(), skip_special_tokens=False,
-                clean_up_tokenization_spaces=False,
+        eos_id = self.template.tokenizer.eos_token_id
+        pad_id = self.template.tokenizer.pad_token_id
+        trimmed_responses = []
+        texts = []
+        for ids in responses:
+            seq = ids.tolist()
+            if eos_id is not None and eos_id in seq:
+                seq = seq[: seq.index(eos_id) + 1]
+            if pad_id is not None and pad_id != eos_id and pad_id in seq:
+                seq = seq[: seq.index(pad_id)]
+            trimmed_responses.append(torch.tensor(seq, dtype=ids.dtype))
+            texts.append(
+                self.template.tokenizer.decode(
+                    seq, skip_special_tokens=False,
+                    clean_up_tokenization_spaces=False,
+                )
             )
-            for ids in responses
-        ]
-        return prompts, responses, texts
+        return prompts, trimmed_responses, texts
 
     def _score_frozen_teacher(self, samples):
         prompts, response_ids, texts = self._generate_frozen_teacher(samples)
