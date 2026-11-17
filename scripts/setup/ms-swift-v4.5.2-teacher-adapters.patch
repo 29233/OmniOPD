@@ -1,0 +1,34 @@
+diff --git a/swift/arguments/rlhf_args.py b/swift/arguments/rlhf_args.py
+index 8b1097c..2db7b58 100644
+--- a/swift/arguments/rlhf_args.py
++++ b/swift/arguments/rlhf_args.py
+@@ -424,7 +424,10 @@ class RLHFArguments(TeacherModelArguments, GRPOArguments, PPOArguments, RewardMo
+ 
+         # Self-distillation: teacher_model == student model
+         if self.teacher_model is not None and self.teacher_model == self.model:
+-            if self.tuner_type == 'lora':
++            # An explicit teacher adapter requires a separate frozen teacher
++            # carrying that adapter; disable_adapter is only the no-adapter
++            # shortcut.
++            if self.tuner_type == 'lora' and not self.teacher_adapters:
+                 logger.info('LoRA + same teacher_model: using disable_adapter() for fixed teacher (no extra model).')
+                 self._teacher_use_disable_adapter = True
+                 self.teacher_model = None
+diff --git a/swift/pipelines/train/rlhf.py b/swift/pipelines/train/rlhf.py
+index edc5825..9abaad6 100644
+--- a/swift/pipelines/train/rlhf.py
++++ b/swift/pipelines/train/rlhf.py
+@@ -97,7 +97,12 @@ class SwiftRLHF(SwiftSft):
+                 task_type=task_type,
+                 num_labels=num_labels)
+ 
+-        adapters = args.adapters if key == 'ref' else args.reward_adapters
++        if key == 'ref':
++            adapters = args.adapters
++        elif key == 'teacher':
++            adapters = args.teacher_adapters
++        else:
++            adapters = args.reward_adapters
+         model = prepare_adapter(args, model, adapters)
+         if origin_key in {'ref', 'reward', 'teacher'}:
+             if self.args.sequence_parallel_size > 1:

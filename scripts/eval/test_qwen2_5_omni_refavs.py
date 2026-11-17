@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import shutil
@@ -20,7 +21,7 @@ import tempfile
 import time
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, MutableMapping
 
 import torch
 
@@ -29,8 +30,50 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _prompt_style_header(row: dict) -> str:
+    messages = row.get("messages") or []
+    if not messages or messages[0].get("role") != "user":
+        raise ValueError("Missing REF-AVS user prompt")
+    content = str(messages[0].get("content") or "")
+    if content.count("<video>") != 1 or content.count("<audio>") != 1:
+        raise ValueError("Expected exactly one video and audio placeholder")
+    if "<video><audio>" not in content:
+        raise ValueError("REF-AVS prompt changed the training media ordering")
+    return content.split("<video><audio>", 1)[0]
+
+
+def _check_task_prompt_style(train_source: Path, test_sources: dict[str, Path]) -> dict:
+    """Reject old-3B raw/new-7B structured CoT prompt swaps before model load."""
+    if not train_source.is_file():
+        raise FileNotFoundError(f"Training prompt source unavailable: {train_source}")
+    with train_source.open(encoding="utf-8") as handle:
+        train = next((json.loads(line) for line in handle if line.strip()), None)
+    if train is None:
+        raise ValueError(f"Empty training source: {train_source}")
+    header = _prompt_style_header(train)
+    counts = {}
+    for split, path in test_sources.items():
+        with path.open(encoding="utf-8") as handle:
+            rows = [json.loads(line) for line in handle if line.strip()]
+        mismatches = [i for i, row in enumerate(rows)
+                      if _prompt_style_header(row) != header]
+        if mismatches:
+            raise ValueError(
+                f"{split}: {len(mismatches)} rows use a different task prompt "
+                f"than the selected checkpoint's training source; first index={mismatches[0]}. "
+                "Do not evaluate a raw-prompt 3B checkpoint on structured-CoT test input."
+            )
+        counts[split] = len(rows)
+    return {
+        "source": str(train_source.resolve()),
+        "header_sha256": hashlib.sha256(header.encode()).hexdigest(),
+        "header_chars": len(header), "checked_test_rows": counts,
+    }
+
+
 def _add_import_paths() -> None:
-    # ONLY the repo root (for swift_plugin). Do NOT add extra swift roots:
+    # Prepend repo root (swift_plugin, scripts, model) and vendored third_party/sam2.
+    # Do NOT add extra swift roots:
     # historically this injected MS_SWIFT_ROOT=third_party/ms-swift
     # (a swift 3.x checkout) AHEAD of the editable-installed ms-swift 4.5.2 in
     # third_party/, mixing 3.x package headers with 4.5.2 submodules in one
@@ -40,13 +83,94 @@ def _add_import_paths() -> None:
     # 4.5.2 metrics). ms-swift now comes from the editable install; MS_SWIFT_ROOT
     # is honored only if explicitly set for a deliberate legacy run.
     root = _repo_root()
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
+    for candidate in (root, root / "third_party/sam2"):
+        if candidate.is_dir() and str(candidate) not in sys.path:
+            sys.path.insert(0, str(candidate))
     swift_root = os.environ.get("MS_SWIFT_ROOT", "")
     if swift_root and swift_root not in sys.path:
         print(f"[warn] MS_SWIFT_ROOT={swift_root} is prepended; this may shadow "
               f"the editable ms-swift 4.5.2 with a legacy checkout.", flush=True)
         sys.path.insert(0, str(swift_root))
+
+
+def _configure_projector_environment(
+    checkpoint: Path,
+    environ: MutableMapping[str, str] | None = None,
+) -> Dict[str, Any]:
+    """Propagate checkpoint projector metadata and validate SAM/SAM2 backend selection."""
+    env = os.environ if environ is None else environ
+    projector_config_path = Path(checkpoint) / "aurora_projector_config.json"
+    if not projector_config_path.is_file():
+        return {}
+    projector_config = json.loads(projector_config_path.read_text(encoding="utf-8"))
+    architecture_environment = {
+        "AURORA_PROJECTOR_HIDDEN_SIZE": str(projector_config["projector_hidden_size"]),
+        "AURORA_PROJECTOR_LAYER_NORM": "1" if projector_config.get("layer_norm") else "0",
+        "AURORA_VIDEO_FPS": str(projector_config["model_timeline_fps"]),
+        "AURORA_NUM_SAM_FRAMES": str(projector_config["sam_frames"]),
+    }
+    for key, value in architecture_environment.items():
+        configured = env.get(key)
+        if configured is not None and configured != value:
+            raise ValueError(
+                f"Checkpoint architecture mismatch: {key}={configured!r}, expected {value!r} "
+                f"from {projector_config_path}"
+            )
+        env[key] = value
+    backend = str(projector_config.get("backend") or "").strip().lower()
+    if backend == "sam2_video_memory":
+        configured_backend = (env.get("AURORA_SEG_BACKEND") or "").strip()
+        if configured_backend and configured_backend.lower() != "sam2":
+            raise ValueError(
+                f"Checkpoint architecture mismatch: AURORA_SEG_BACKEND={configured_backend!r}, "
+                f"expected 'sam2' for backend='sam2_video_memory' from {projector_config_path}"
+            )
+        env["AURORA_SEG_BACKEND"] = "sam2"
+        sam2_config = projector_config.get("sam2_config")
+        if sam2_config and not (env.get("AURORA_SAM2_CONFIG") or "").strip():
+            env["AURORA_SAM2_CONFIG"] = str(sam2_config)
+    elif backend == "sam":
+        configured_backend = (env.get("AURORA_SEG_BACKEND") or "").strip()
+        if configured_backend and configured_backend.lower() != "sam":
+            raise ValueError(
+                f"Checkpoint architecture mismatch: AURORA_SEG_BACKEND={configured_backend!r}, "
+                f"expected 'sam' from {projector_config_path}"
+            )
+        env["AURORA_SEG_BACKEND"] = "sam"
+    return projector_config
+
+
+def _resolve_sam2_checkpoint(environ: MutableMapping[str, str] | None = None) -> Path | None:
+    """Ensure AURORA_SAM2_CHECKPOINT points to an existing file when using SAM2."""
+    env = os.environ if environ is None else environ
+    if (env.get("AURORA_SEG_BACKEND") or "sam").strip().lower() != "sam2":
+        return None
+    sam2_ckpt = (env.get("AURORA_SAM2_CHECKPOINT") or "").strip()
+    if not sam2_ckpt:
+        sam2_ckpt = (env.get("SAM2_CHECKPOINT") or "").strip()
+        if sam2_ckpt:
+            env["AURORA_SAM2_CHECKPOINT"] = sam2_ckpt
+    if not sam2_ckpt:
+        default_sam2 = _repo_root() / "models/sam2_hiera_large.pt"
+        if default_sam2.is_file():
+            env["AURORA_SAM2_CHECKPOINT"] = str(default_sam2)
+            return default_sam2
+        raise FileNotFoundError(
+            "AURORA_SEG_BACKEND=sam2 requires a SAM2 base checkpoint, but neither "
+            "AURORA_SAM2_CHECKPOINT nor SAM2_CHECKPOINT is set (and default "
+            f"{default_sam2} does not exist). Set AURORA_SAM2_CHECKPOINT=/path/to/sam2_hiera_large.pt."
+        )
+    ckpt_path = Path(sam2_ckpt)
+    if not ckpt_path.is_file():
+        repo_relative = _repo_root() / sam2_ckpt
+        if not ckpt_path.is_absolute() and repo_relative.is_file():
+            env["AURORA_SAM2_CHECKPOINT"] = str(repo_relative)
+            return repo_relative
+        raise FileNotFoundError(
+            f"AURORA_SAM2_CHECKPOINT points to a missing file: {sam2_ckpt!r}. "
+            "Set AURORA_SAM2_CHECKPOINT (or SAM2_CHECKPOINT) to an existing SAM2 checkpoint file."
+        )
+    return ckpt_path
 
 
 def _to_device(value: Any, device: torch.device) -> Any:
@@ -501,6 +625,18 @@ def _build_engine(args):
     config_path = adapter_dir / "adapter_config.json"
     if not state_path.is_file() or not config_path.is_file():
         raise FileNotFoundError(f"Checkpoint must contain adapter_model.safetensors and adapter_config.json: {adapter_dir}")
+    # Restore and validate the trained sidecar BEFORE PEFT wraps
+    # modules_to_save. The adapter can also contain active SAM2 weights:
+    # restoring the sidecar made no difference to the single audited smoke
+    # mask, so that smoke does NOT establish that the older path was random.
+    # Afterwards these modules are ModulesToSaveWrapper objects and their
+    # state_dict keys no longer match the unwrapped sidecar.
+    from swift_plugin.aurora_qwen2_5_omni import _restore_trained_sam_weights
+    if getattr(engine.model, "sam2_head", None) is not None:
+        sidecar = adapter_dir / "sam2_video_decoder.safetensors"
+        if not sidecar.is_file():
+            raise FileNotFoundError(f"Trained SAM2 checkpoint sidecar missing: {sidecar}")
+    _restore_trained_sam_weights(engine.model, str(adapter_dir))
     state = load_file(str(state_path), device="cpu")
     talker_key = "base_model.model.talker.model.embed_tokens.weight"
     # Qwen2.5-Omni model variants differ across Transformers/ms-swift
@@ -759,6 +895,7 @@ def _evaluate_split(args, engine, template, device, split: str, output_dir: Path
 
 
 def main() -> None:
+    _add_import_paths()
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default=os.environ.get("MODEL_PATH", "models/Qwen2___5-Omni-3B"))
     parser.add_argument("--checkpoint", required=True, help="ms-swift checkpoint directory containing adapter_model.safetensors")
@@ -813,6 +950,10 @@ def main() -> None:
     parser.add_argument("--torch-dtype", choices=["float16", "bfloat16", "float32"], default="float16")
     parser.add_argument("--max-pixels", type=int, default=None, help="Match the training template max_pixels")
     parser.add_argument("--max-length", type=int, default=None, help="Match the training template max_length")
+    parser.add_argument("--dataset-timing-audit", type=Path,
+                        help="Audited dataset FPS JSON, required when checkpoint has no training manifest")
+    parser.add_argument("--train-prompt-source", type=Path,
+                        help="Override a relocated checkpoint's saved dataset path for prompt-style parity checks")
     parser.add_argument("--match-training-settings", action="store_true",
                         help="Require matching checkpoint args.json and dual_launch.json before loading the model")
     parser.add_argument("--fps-policy", choices=['training', 'dataset'], default='training',
@@ -846,23 +987,8 @@ def main() -> None:
              "directory. Empty (default) = original audio. Missing degraded "
              "files fail the run.")
     args = parser.parse_args()
-    projector_config_path = Path(args.checkpoint) / "aurora_projector_config.json"
-    if projector_config_path.is_file():
-        projector_config = json.loads(projector_config_path.read_text(encoding="utf-8"))
-        architecture_environment = {
-            "AURORA_PROJECTOR_HIDDEN_SIZE": str(projector_config["projector_hidden_size"]),
-            "AURORA_PROJECTOR_LAYER_NORM": "1" if projector_config.get("layer_norm") else "0",
-            "AURORA_VIDEO_FPS": str(projector_config["model_timeline_fps"]),
-            "AURORA_NUM_SAM_FRAMES": str(projector_config["sam_frames"]),
-        }
-        for key, value in architecture_environment.items():
-            configured = os.environ.get(key)
-            if configured is not None and configured != value:
-                raise ValueError(
-                    f"Checkpoint architecture mismatch: {key}={configured!r}, expected {value!r} "
-                    f"from {projector_config_path}"
-                )
-            os.environ[key] = value
+    projector_config = _configure_projector_environment(Path(args.checkpoint))
+    if projector_config:
         print(f"[checkpoint-architecture] {json.dumps(projector_config, sort_keys=True)}", flush=True)
     if args.match_training_settings:
         from scripts.eval.omni_eval_settings import validate_training_settings
@@ -877,12 +1003,103 @@ def main() -> None:
         model_text = f"{args.model} {args.checkpoint}".lower()
         model_name = "qwen2_5_omni_7b" if "7b" in model_text else "qwen2_5_omni_3b"
         args.output_dir = str(_repo_root() / "outputs/eval" / model_name / checkpoint_name)
-    _add_import_paths()
-    os.environ.setdefault("AURORA_SAM_CHECKPOINT", "models/sam_vit_h_4b8939.pth")
+    if (os.environ.get("AURORA_SEG_BACKEND") or "sam").strip().lower() == "sam2":
+        _resolve_sam2_checkpoint()
+    else:
+        default_sam = _repo_root() / "models/sam_vit_h_4b8939.pth"
+        os.environ.setdefault(
+            "AURORA_SAM_CHECKPOINT",
+            str(default_sam) if default_sam.is_file() else "models/sam_vit_h_4b8939.pth",
+        )
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     if args.mask_dir is None:
         args.mask_dir = str(output_dir / "masks")
+    # Fail before loading 7B weights on known train/eval preprocessing
+    # mismatches. The SFT checkpoint has no dual_launch.json, so validate
+    # directly against its saved args, projector and parent run manifest.
+    checkpoint_path = Path(args.checkpoint)
+    if checkpoint_path.is_dir():
+        saved_args = json.loads((checkpoint_path / "args.json").read_text())
+        source_manifest = next(
+            (p for p in (checkpoint_path / "training_manifest.json",
+                         checkpoint_path.parent / "training_manifest.json",
+                         checkpoint_path.parent.parent / "training_manifest.json") if p.is_file()),
+            None,
+        )
+        training = json.loads(source_manifest.read_text()) if source_manifest else {}
+        if not training and args.dataset_timing_audit is None:
+            raise ValueError("No saved training manifest: supply --dataset-timing-audit to verify media timing")
+        audit = json.loads(args.dataset_timing_audit.read_text()) if args.dataset_timing_audit else {}
+        if audit and (audit.get("unique_clips_checked", 0) < 1 or audit.get("nominal_fps", 0) <= 0):
+            raise ValueError("Incomplete dataset timing audit")
+        expected = {
+            "max_pixels": args.max_pixels, "max_length": args.max_length,
+            "torch_dtype": args.torch_dtype, "attn_impl": args.attn_impl,
+        }
+        for key, actual in expected.items():
+            if actual is None or saved_args.get(key) != actual:
+                raise ValueError(f"Checkpoint/eval mismatch: {key} train={saved_args.get(key)!r}, eval={actual!r}")
+        if training:
+            for key, actual in (("max_pixels", args.max_pixels), ("max_length", args.max_length),
+                                ("attn_impl", args.attn_impl)):
+                if key in training and training[key] != actual:
+                    raise ValueError(f"Run manifest/eval mismatch: {key}")
+        projector_path = checkpoint_path / "aurora_projector_config.json"
+        projector = json.loads(projector_path.read_text()) if projector_path.is_file() else {}
+        if projector:
+            for key in ("FPS", "AURORA_VIDEO_FPS"):
+                if key not in os.environ or float(os.environ[key]) != float(projector["model_timeline_fps"]):
+                    raise ValueError(f"Checkpoint/eval FPS mismatch: {key}")
+            if int(os.environ["AURORA_NUM_SAM_FRAMES"]) != int(projector["sam_frames"]):
+                raise ValueError("Checkpoint/eval SAM frame count mismatch")
+        nominal_fps = training.get("dataset_nominal_fps", audit.get("nominal_fps"))
+        if audit and training.get("dataset_nominal_fps") is not None and float(audit["nominal_fps"]) != float(nominal_fps):
+            raise ValueError("Training manifest/dataset audit FPS mismatch")
+        data_sources = {split: Path(args.data_dir) / f"refavs_{split}.jsonl" for split in args.splits}
+        datasets = saved_args.get("dataset") or []
+        if isinstance(datasets, str):
+            datasets = [datasets]
+        if not datasets and args.train_prompt_source is None:
+            raise ValueError("Checkpoint args lack a recorded training prompt source")
+        prompt_style = _check_task_prompt_style(
+            args.train_prompt_source or Path(datasets[0]), data_sources
+        )
+        def sha256(path):
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for block in iter(lambda: stream.read(1 << 20), b""):
+                    digest.update(block)
+            return digest.hexdigest()
+        manifest = {
+            "checkpoint": str(checkpoint_path.resolve()),
+            "training_args": str((checkpoint_path / "args.json").resolve()),
+            "training_manifest": str(source_manifest.resolve()) if source_manifest else None,
+            "dataset_timing_audit": str(args.dataset_timing_audit.resolve()) if audit else None,
+            "projector_config": str(projector_path.resolve()) if projector else None,
+            "data_sources_sha256": {split: sha256(path) for split, path in data_sources.items()},
+            "training_prompt_style": prompt_style,
+            "splits": args.splits, "max_samples": args.max_samples,
+            "full_official_split": args.max_samples == -1 and set(args.splits) <= {"test_s", "test_u"},
+            "language_only": not args.run_sam, "save_masks": args.run_sam and args.save_masks,
+            "mask_directory": str(Path(args.mask_dir).resolve()) if args.run_sam and args.save_masks else None,
+            "mask_saving_exception": "language-only diagnostic" if not args.run_sam else None,
+            "per_frame_metrics": args.run_sam,
+            "model_timeline_fps": projector.get("model_timeline_fps"),
+            "dataset_nominal_fps": nominal_fps,
+            "exact_dataset_frame_timestamps_verified": False,
+            "media_limits": {k: os.environ.get(k) for k in
+                             ("FPS_MAX_FRAMES", "VIDEO_MAX_TOKEN_NUM", "IMAGE_MAX_TOKEN_NUM")},
+            "training_settings_matched": expected,
+            "sam_frames": projector.get("sam_frames"),
+            "decoding": {"temperature": args.temperature, "top_p": args.top_p,
+                         "max_new_tokens": args.max_new_tokens},
+            "inference_differences": [
+                "Free greedy generation versus supervised teacher-forced SFT"
+            ] if args.temperature == 0 else ["Free sampled generation versus supervised teacher-forced SFT"],
+            "opd_gain_claim": False,
+        }
+        (output_dir / "evaluation_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     rank = int(os.environ.get("RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     engine, template, device = _build_engine(args)

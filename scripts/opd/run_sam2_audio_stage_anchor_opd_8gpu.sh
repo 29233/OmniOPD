@@ -5,11 +5,45 @@ set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT_DIR}"
 export PYTHONUTF8=1 LANG=C.UTF-8 LC_ALL=C.UTF-8
-PYTHON_BIN="${PYTHON_BIN:-python}"
+if [[ "${OMNIOPD_LOAD_ENV:-0}" == "1" && -f "${ROOT_DIR}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${ROOT_DIR}/.env"
+  set +a
+fi
+if [[ -z "${SWIFT_ENV:-}" ]]; then
+  if [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/python" ]]; then
+    SWIFT_ENV="${VIRTUAL_ENV}"
+  elif [[ -n "${CONDA_PREFIX:-}" && "${CONDA_DEFAULT_ENV:-base}" != "base" && -x "${CONDA_PREFIX}/bin/python" ]]; then
+    SWIFT_ENV="${CONDA_PREFIX}"
+  elif [[ -x "${ROOT_DIR}/.venv/bin/python" ]]; then
+    SWIFT_ENV="${ROOT_DIR}/.venv"
+  fi
+fi
+if [[ -z "${PYTHON_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/python" ]]; then
+    PYTHON_BIN="${SWIFT_ENV}/bin/python"
+  else
+    PYTHON_BIN="$(command -v python3 || command -v python || true)"
+  fi
+elif [[ "${PYTHON_BIN}" != */* ]]; then
+  PYTHON_BIN="$(command -v "${PYTHON_BIN}" || true)"
+fi
+if [[ -z "${SWIFT_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/swift" ]]; then
+    SWIFT_BIN="${SWIFT_ENV}/bin/swift"
+  else
+    SWIFT_BIN="$(command -v swift || true)"
+  fi
+elif [[ "${SWIFT_BIN}" != */* ]]; then
+  SWIFT_BIN="$(command -v "${SWIFT_BIN}" || true)"
+fi
+export SWIFT_ENV PYTHON_BIN SWIFT_BIN
+export PYTHONPATH="${ROOT_DIR}/third_party/sam2:${ROOT_DIR}:${PYTHONPATH:-}"
 
 RUN_ID="${RUN_ID:-20261031_v1}"
-BASE_MODEL="${BASE_MODEL:-models/Qwen2___5-Omni-7B}"
-CHECKPOINT="${CHECKPOINT:-${ROOT_DIR}/outputs/train/qwen2_5_omni_7b_sam2_joint_sft_20261030_v2_3epoch/v0-20261029-184656/checkpoint-3825}"
+BASE_MODEL="${BASE_MODEL:-${MODEL:-models/Qwen2___5-Omni-7B}}"
+CHECKPOINT="${CHECKPOINT:-${SFT_CHECKPOINT:-${ROOT_DIR}/outputs/train/qwen2_5_omni_7b_sam2_joint_sft_20261030_v2_3epoch/v0-20261029-184656/checkpoint-3825}}"
 DATA_ROOT="${DATA_ROOT:-${ROOT_DIR}/outputs/data/privilege_top10_full_20261031_full_v1}"
 TRAIN_JSONL="${TRAIN_JSONL:-${DATA_ROOT}/train.jsonl}"
 VAL_JSONL="${VAL_JSONL:-${DATA_ROOT}/val.jsonl}"
@@ -23,18 +57,20 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 IFS=',' read -r -a GPU_DEVICES <<< "${CUDA_VISIBLE_DEVICES}"
 [[ "${#GPU_DEVICES[@]}" -eq 8 ]] || { echo "Audio-stage anchor OPD requires eight GPUs" >&2; exit 2; }
 
-for required in "${PYTHON_BIN}" "${BASE_MODEL}/config.json" \
+for required in "${PYTHON_BIN}" "${SWIFT_BIN}" "${BASE_MODEL}/config.json" \
   "${CHECKPOINT}/adapter_model.safetensors" "${CHECKPOINT}/args.json" \
   "${CHECKPOINT}/aurora_projector_config.json" "${CHECKPOINT}/sam2_video_decoder.safetensors" \
   "${TRAIN_JSONL}" "${VAL_JSONL}" "${DATA_ROOT}/manifest.json" "${SAM2_CHECKPOINT}"; do
-  [[ -e "${required}" ]] || { echo "Missing audio-stage anchor requirement: ${required}" >&2; exit 1; }
+  [[ -n "${required}" && -e "${required}" ]] || { echo "Missing audio-stage anchor requirement: ${required:-<empty>}" >&2; exit 1; }
 done
 mkdir -p "${OUTPUT_DIR}"
 
 export BASE_MODEL STAGE1_ADAPTERS="${CHECKPOINT}" TEACHER_MODEL="${BASE_MODEL}" TEACHER_ADAPTERS="${CHECKPOINT}"
 export TRAIN_JSONL VAL_JSONL OUTPUT_DIR NPROC_PER_NODE=8
 export AURORA_SEG_BACKEND=sam2 AURORA_SAM2_CHECKPOINT="${SAM2_CHECKPOINT}" AURORA_SAM2_CONFIG="${SAM2_CONFIG}"
-export DATASET_VIDEO_FPS=1.0 FPS=1.0 AURORA_VIDEO_FPS=1.0 AURORA_NUM_SAM_FRAMES=10
+export DATASET_VIDEO_FPS="${DATASET_VIDEO_FPS:-1.0}"
+export FPS="${FPS:-1.0}"
+export AURORA_VIDEO_FPS="${AURORA_VIDEO_FPS:-${FPS}}" AURORA_NUM_SAM_FRAMES=10
 export AURORA_PROJECTOR_HIDDEN_SIZE=1024 AURORA_PROJECTOR_LAYER_NORM=0
 export FPS_MAX_FRAMES=768 VIDEO_MAX_TOKEN_NUM=768 IMAGE_MAX_TOKEN_NUM=16384
 export ENABLE_AUDIO_OUTPUT=0 USE_AUDIO_IN_VIDEO=0 TOKENIZERS_PARALLELISM=false

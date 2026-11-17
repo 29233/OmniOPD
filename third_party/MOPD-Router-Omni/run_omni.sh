@@ -3,7 +3,29 @@
 set -euo pipefail
 REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT="$(cd "$REPO/../.." && pwd)"
-export PYTHON_BIN="${PYTHON_BIN:-$PROJECT/outputs/envs/mopd-router-omni-v1/bin/python}"
+if [[ "${OMNIOPD_LOAD_ENV:-0}" == "1" && -f "$PROJECT/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$PROJECT/.env"
+  set +a
+fi
+OMNI_ENV="${OMNI_ENV:-$PROJECT/outputs/envs/mopd-router-omni-v1}"
+if [[ -z "${PYTHON_BIN:-}" ]]; then
+  if [[ -x "$OMNI_ENV/bin/python" ]]; then
+    PYTHON_BIN="$OMNI_ENV/bin/python"
+  elif [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/python" ]]; then
+    PYTHON_BIN="${VIRTUAL_ENV}/bin/python"
+  else
+    PYTHON_BIN="$(command -v python3 || command -v python || true)"
+  fi
+elif [[ "${PYTHON_BIN}" != */* ]]; then
+  PYTHON_BIN="$(command -v "${PYTHON_BIN}" || true)"
+fi
+export PYTHON_BIN
+if [[ -z "${PYTHON_BIN}" || ! -x "${PYTHON_BIN}" ]]; then
+  echo "Missing executable PYTHON_BIN for MOPD-Router-Omni. Run bash third_party/MOPD-Router-Omni/bootstrap_omni_env.sh or set PYTHON_BIN." >&2
+  exit 2
+fi
 export PYTHONPATH="$REPO:$REPO/verl"
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TOKENIZERS_PARALLELISM=false
 export ENABLE_AUDIO_OUTPUT=0 USE_AUDIO_IN_VIDEO=0

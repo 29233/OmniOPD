@@ -5,23 +5,69 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SWIFT_ENV="${SWIFT_ENV:-${CONDA_PREFIX:-/usr/local}}"
-export SWIFT_BIN="${SWIFT_BIN:-${SWIFT_ENV}/bin/swift}"
-export PYTHON_BIN="${PYTHON_BIN:-${SWIFT_ENV}/bin/python}"
-export TORCHRUN_BIN="${TORCHRUN_BIN:-${SWIFT_ENV}/bin/torchrun}"
+cd "${ROOT_DIR}"
+export PYTHONUTF8=1 LANG=C.UTF-8 LC_ALL=C.UTF-8
+if [[ "${OMNIOPD_LOAD_ENV:-0}" == "1" && -f "${ROOT_DIR}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${ROOT_DIR}/.env"
+  set +a
+fi
+if [[ -z "${SWIFT_ENV:-}" ]]; then
+  if [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/python" ]]; then
+    SWIFT_ENV="${VIRTUAL_ENV}"
+  elif [[ -n "${CONDA_PREFIX:-}" && "${CONDA_DEFAULT_ENV:-base}" != "base" && -x "${CONDA_PREFIX}/bin/python" ]]; then
+    SWIFT_ENV="${CONDA_PREFIX}"
+  elif [[ -x "${ROOT_DIR}/.venv/bin/python" ]]; then
+    SWIFT_ENV="${ROOT_DIR}/.venv"
+  fi
+fi
+if [[ -z "${PYTHON_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/python" ]]; then
+    PYTHON_BIN="${SWIFT_ENV}/bin/python"
+  else
+    PYTHON_BIN="$(command -v python3 || command -v python || true)"
+  fi
+elif [[ "${PYTHON_BIN}" != */* ]]; then
+  PYTHON_BIN="$(command -v "${PYTHON_BIN}" || true)"
+fi
+if [[ -z "${SWIFT_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/swift" ]]; then
+    SWIFT_BIN="${SWIFT_ENV}/bin/swift"
+  else
+    SWIFT_BIN="$(command -v swift || true)"
+  fi
+elif [[ "${SWIFT_BIN}" != */* ]]; then
+  SWIFT_BIN="$(command -v "${SWIFT_BIN}" || true)"
+fi
+if [[ -z "${TORCHRUN_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/torchrun" ]]; then
+    TORCHRUN_BIN="${SWIFT_ENV}/bin/torchrun"
+  else
+    TORCHRUN_BIN="$(command -v torchrun || true)"
+  fi
+elif [[ "${TORCHRUN_BIN}" != */* ]]; then
+  TORCHRUN_BIN="$(command -v "${TORCHRUN_BIN}" || true)"
+fi
+export SWIFT_ENV SWIFT_BIN PYTHON_BIN TORCHRUN_BIN
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 export NPROC_PER_NODE=4
-export MODEL_PATH="${MODEL_PATH:-models/Qwen2___5-Omni-7B}"
+export MODEL_PATH="${MODEL_PATH:-${MODEL:-models/Qwen2___5-Omni-7B}}"
 export INIT_CHECKPOINT="${INIT_CHECKPOINT:-${ROOT_DIR}/outputs/train/qwen2_5_omni_7b_sft_4gpu/v0-20260828-021854/checkpoint-5265}"
-export TRAIN_JSONL="${TRAIN_JSONL:-${ROOT_DIR}/outputs/data/refavs/refavs_full.jsonl}"
 export DATA_DIR="${DATA_DIR:-${ROOT_DIR}/outputs/data/refavs}"
+_DEFAULT_TRAIN_JSONL="${DATA_DIR}/refavs_train.jsonl"
+if [[ ! -f "${_DEFAULT_TRAIN_JSONL}" && -f "${DATA_DIR}/refavs_full.jsonl" ]]; then
+  _DEFAULT_TRAIN_JSONL="${DATA_DIR}/refavs_full.jsonl"
+fi
+export TRAIN_JSONL="${TRAIN_JSONL:-${_DEFAULT_TRAIN_JSONL}}"
 export OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/outputs/train/qwen2_5_omni_7b_seg_only_1epoch_4gpu}"
 export EVAL_OUTPUT_ROOT="${EVAL_OUTPUT_ROOT:-${ROOT_DIR}/outputs/eval/qwen2_5_omni_7b/seg_only_1epoch_4gpu}"
 
 # checkpoint-5265 predates the corrected 1-fps timeline experiment. Preserve
 # its training-time timeline so this run changes only the optimization target.
-export AURORA_VIDEO_FPS="${AURORA_VIDEO_FPS:-2.0}"
+export FPS="${FPS:-2.0}"
+export AURORA_VIDEO_FPS="${AURORA_VIDEO_FPS:-${FPS}}"
 export AURORA_SEGMENTATION_ONLY=1
 export AURORA_CE_WEIGHT=0
 export AURORA_BCE_WEIGHT="${AURORA_BCE_WEIGHT:-2.0}"
@@ -30,14 +76,17 @@ export AURORA_NUM_SAM_FRAMES="${AURORA_NUM_SAM_FRAMES:-10}"
 export AURORA_SAM_CHECKPOINT="${AURORA_SAM_CHECKPOINT:-models/sam_vit_h_4b8939.pth}"
 export ENABLE_AUDIO_OUTPUT=0
 export MAX_PIXELS="${MAX_PIXELS:-200704}"
-export PYTHONPATH="${ROOT_DIR}:${PYTHONPATH:-}"
+export MAX_LENGTH="${MAX_LENGTH:-4096}"
+export DATASET_AUDIT="${DATASET_AUDIT:-}"
+export TRAIN_PROMPT_SOURCE="${TRAIN_PROMPT_SOURCE:-}"
+export PYTHONPATH="${ROOT_DIR}/third_party/sam2:${ROOT_DIR}:${PYTHONPATH:-}"
 
 export LEARNING_RATE="${LEARNING_RATE:-1e-5}"
 export GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-2}"
 export MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-512}"
 export MAX_SAMPLES="${MAX_SAMPLES:--1}"
 export EVAL_MAX_SAMPLES="${EVAL_MAX_SAMPLES:--1}"
-export SAVE_MASKS="${SAVE_MASKS:-0}"
+export SAVE_MASKS="${SAVE_MASKS:-1}"
 export REPORT_TO="${REPORT_TO:-tensorboard}"
 
 for required in \
@@ -116,7 +165,7 @@ NPROC_PER_NODE=4 \
   --gradient_accumulation_steps "${GRADIENT_ACCUMULATION_STEPS}" \
   --num_train_epochs 1 \
   --max_steps -1 \
-  --max_length 4096 \
+  --max_length "${MAX_LENGTH}" \
   --max_pixels "${MAX_PIXELS}" \
   --learning_rate "${LEARNING_RATE}" \
   --lr_scheduler_type cosine \
@@ -153,6 +202,17 @@ RUN_NAME="$(basename "$(dirname "${TRAINED_CHECKPOINT}")")_$(basename "${TRAINED
 EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-${EVAL_OUTPUT_ROOT}/${RUN_NAME}}"
 mkdir -p "${EVAL_OUTPUT_DIR}"
 
+if [[ -z "${DATASET_AUDIT}" ]]; then
+  for candidate in \
+    "${ROOT_DIR}/outputs/artifacts/audit.json" \
+    "${ROOT_DIR}/outputs/artifacts/refavs_fps_audit_20261025/audit.json"; do
+    if [[ -f "${candidate}" ]]; then
+      DATASET_AUDIT="${DATASET_AUDIT:-${candidate}}"
+      break
+    fi
+  done
+fi
+
 EVAL_ARGS=(
   "${ROOT_DIR}/scripts/eval/test_qwen2_5_omni_refavs.py"
   --model "${MODEL_PATH}"
@@ -162,9 +222,20 @@ EVAL_ARGS=(
   --splits test_s test_u
   --max-samples "${EVAL_MAX_SAMPLES}"
   --max-new-tokens "${MAX_NEW_TOKENS}"
+  --torch-dtype float16
+  --attn-impl sdpa
+  --max-pixels "${MAX_PIXELS}"
+  --max-length "${MAX_LENGTH}"
+  --train-prompt-source "${TRAIN_PROMPT_SOURCE:-${TRAIN_JSONL}}"
+  --run-sam
 )
+if [[ -n "${DATASET_AUDIT}" ]]; then
+  EVAL_ARGS+=(--dataset-timing-audit "${DATASET_AUDIT}")
+fi
 if [[ "${SAVE_MASKS}" == "0" ]]; then
   EVAL_ARGS+=(--no-save-masks)
+else
+  EVAL_ARGS+=(--save-masks)
 fi
 
 echo "Training complete: ${TRAINED_CHECKPOINT}"

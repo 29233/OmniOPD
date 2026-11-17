@@ -1,9 +1,43 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-PYTHON_BIN="${PYTHON_BIN:-python}"
-export PYTHONPATH="${ROOT_DIR}:${PYTHONPATH:-}"
-export PYTHON_BIN
+cd "${ROOT_DIR}"
+export PYTHONUTF8=1 LANG=C.UTF-8 LC_ALL=C.UTF-8
+if [[ "${OMNIOPD_LOAD_ENV:-0}" == "1" && -f "${ROOT_DIR}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${ROOT_DIR}/.env"
+  set +a
+fi
+if [[ -z "${SWIFT_ENV:-}" ]]; then
+  if [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/python" ]]; then
+    SWIFT_ENV="${VIRTUAL_ENV}"
+  elif [[ -n "${CONDA_PREFIX:-}" && "${CONDA_DEFAULT_ENV:-base}" != "base" && -x "${CONDA_PREFIX}/bin/python" ]]; then
+    SWIFT_ENV="${CONDA_PREFIX}"
+  elif [[ -x "${ROOT_DIR}/.venv/bin/python" ]]; then
+    SWIFT_ENV="${ROOT_DIR}/.venv"
+  fi
+fi
+if [[ -z "${PYTHON_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/python" ]]; then
+    PYTHON_BIN="${SWIFT_ENV}/bin/python"
+  else
+    PYTHON_BIN="$(command -v python3 || command -v python || true)"
+  fi
+elif [[ "${PYTHON_BIN}" != */* ]]; then
+  PYTHON_BIN="$(command -v "${PYTHON_BIN}" || true)"
+fi
+if [[ -z "${SWIFT_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/swift" ]]; then
+    SWIFT_BIN="${SWIFT_ENV}/bin/swift"
+  else
+    SWIFT_BIN="$(command -v swift || true)"
+  fi
+elif [[ "${SWIFT_BIN}" != */* ]]; then
+  SWIFT_BIN="$(command -v "${SWIFT_BIN}" || true)"
+fi
+export PYTHONPATH="${ROOT_DIR}/third_party/sam2:${ROOT_DIR}:${PYTHONPATH:-}"
+export SWIFT_ENV PYTHON_BIN SWIFT_BIN
 export AUDIO_SEED="${AUDIO_SEED:-20261015}"
 
 export SNR_DB="${SNR_DB:-5}"
@@ -13,17 +47,27 @@ export BASE_MODEL="${BASE_MODEL:-${SOURCE_DIR}/models/Qwen2___5-Omni-3B}"
 export STAGE1_ADAPTERS="${STAGE1_ADAPTERS:-${ROOT_DIR}/outputs/train/qwen2_5_omni_sft_full/v1-20260827-141702/checkpoint-5262}"
 export TEACHER_MODEL="${TEACHER_MODEL:-${BASE_MODEL}}"
 export TEACHER_ADAPTERS="${TEACHER_ADAPTERS:-${STAGE1_ADAPTERS}}"
-export DEGRADED_NAME="audio_opsd_noise${SNR_DB}db.wav"
+export DEGRADED_NAME="${DEGRADED_NAME:-audio_opsd_noise${SNR_DB}db.wav}"
+_DEFAULT_NOISE_SRC="${ROOT_DIR}/outputs/data/refavs/refavs_full.jsonl"
+if [[ ! -f "${_DEFAULT_NOISE_SRC}" && -f "${ROOT_DIR}/outputs/data/refavs/refavs_train.jsonl" ]]; then
+  _DEFAULT_NOISE_SRC="${ROOT_DIR}/outputs/data/refavs/refavs_train.jsonl"
+fi
+SOURCE_TRAIN_JSONL="${SOURCE_TRAIN_JSONL:-${_DEFAULT_NOISE_SRC}}"
+SOURCE_VAL_JSONL="${SOURCE_VAL_JSONL:-${ROOT_DIR}/outputs/data/refavs/refavs_val.jsonl}"
 export TRAIN_JSONL="${TRAIN_JSONL:-${ROOT_DIR}/outputs/data/refavs/refavs_full_opsd_audio_noise${SNR_DB}db.jsonl}"
 export VAL_JSONL="${VAL_JSONL:-${ROOT_DIR}/outputs/data/refavs/refavs_val_opsd_audio_noise${SNR_DB}db.jsonl}"
 export OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/outputs/train/${RUN_TAG}}"
 
-"${PYTHON_BIN}" "${ROOT_DIR}/scripts/data/prepare_opsd_audio_condition.py" \
-  --condition noise5db --seed "${AUDIO_SEED}" --snr-db "${SNR_DB}" --output-name "${DEGRADED_NAME}" \
-  --metadata "${ROOT_DIR}/outputs/data/audio_degraded/opsd_noise${SNR_DB}db.json"
-"${PYTHON_BIN}" "${ROOT_DIR}/scripts/data/prepare_refavs_opsd.py" \
-  --privilege-kind audio-degrade --degraded-audio-name "${DEGRADED_NAME}" \
-  --dst "${TRAIN_JSONL}" --val-dst "${VAL_JSONL}"
+if [[ "${SKIP_DATA_PREP:-0}" != "1" && "${DRY_RUN:-0}" != "1" ]]; then
+  "${PYTHON_BIN}" "${ROOT_DIR}/scripts/data/prepare_opsd_audio_condition.py" \
+    --condition noise5db --seed "${AUDIO_SEED}" --snr-db "${SNR_DB}" --output-name "${DEGRADED_NAME}" \
+    --metadata "${ROOT_DIR}/outputs/data/audio_degraded/opsd_noise${SNR_DB}db.json" \
+    --manifest "${SOURCE_TRAIN_JSONL}" --manifest "${SOURCE_VAL_JSONL}"
+  "${PYTHON_BIN}" "${ROOT_DIR}/scripts/data/prepare_refavs_opsd.py" \
+    --privilege-kind audio-degrade --degraded-audio-name "${DEGRADED_NAME}" \
+    --src "${SOURCE_TRAIN_JSONL}" --val-src "${SOURCE_VAL_JSONL}" \
+    --dst "${TRAIN_JSONL}" --val-dst "${VAL_JSONL}"
+fi
 
 export AURORA_OPSD_TEACHER_MODE=frozen
 export AURORA_OPSD_REQUIRE_FROZEN_TEACHER=1

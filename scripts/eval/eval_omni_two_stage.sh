@@ -2,23 +2,51 @@
 # Run independent GPU replicas, finish generation, then run SAM and aggregate.
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+export PYTHONUTF8=1 LANG=C.UTF-8 LC_ALL=C.UTF-8
+if [[ "${OMNIOPD_LOAD_ENV:-0}" == "1" && -f "${ROOT_DIR}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${ROOT_DIR}/.env"
+  set +a
+fi
+if [[ -z "${SWIFT_ENV:-}" ]]; then
+  if [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/python" ]]; then
+    SWIFT_ENV="${VIRTUAL_ENV}"
+  elif [[ -n "${CONDA_PREFIX:-}" && "${CONDA_DEFAULT_ENV:-base}" != "base" && -x "${CONDA_PREFIX}/bin/python" ]]; then
+    SWIFT_ENV="${CONDA_PREFIX}"
+  elif [[ -x "${ROOT_DIR}/.venv/bin/python" ]]; then
+    SWIFT_ENV="${ROOT_DIR}/.venv"
+  fi
+fi
+if [[ -z "${PYTHON_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/python" ]]; then
+    PYTHON_BIN="${SWIFT_ENV}/bin/python"
+  else
+    PYTHON_BIN="$(command -v python3 || command -v python || true)"
+  fi
+elif [[ "${PYTHON_BIN}" != */* ]]; then
+  PYTHON_BIN="$(command -v "${PYTHON_BIN}" || true)"
+fi
+export SWIFT_ENV PYTHON_BIN
+[[ -n "${PYTHON_BIN}" && -x "${PYTHON_BIN}" ]] || { echo "Missing executable PYTHON_BIN: ${PYTHON_BIN:-<empty>}" >&2; exit 1; }
 FAMILY="${FAMILY:-qwen3}"
 : "${CHECKPOINT:?Set CHECKPOINT to the trained adapter directory}"
 : "${OUTPUT_DIR:?Set OUTPUT_DIR to a new output directory}"
 case "${FAMILY}" in
   qwen3)
     DEFAULT_MAX_NEW_TOKENS=256
-    PYTHON_BIN="${PYTHON_BIN:-python}"
     MODEL_PATH="${MODEL_PATH:-${ROOT_DIR}/model/Qwen3-Omni-30B-A3B-Instruct}"
     GPU_GROUPS="${GPU_GROUPS:-0,1;2,3}"
-    export PYTHONPATH="${ROOT_DIR}/third_party/ms-swift:${ROOT_DIR}"
+    export PYTHONPATH="${ROOT_DIR}/third_party/sam2:${ROOT_DIR}:${PYTHONPATH:-}"
+    if [[ -n "${MS_SWIFT_ROOT:-}" ]]; then
+      export PYTHONPATH="${MS_SWIFT_ROOT}:${PYTHONPATH}"
+    fi
     ;;
   qwen2_5)
     DEFAULT_MAX_NEW_TOKENS=512
-    PYTHON_BIN="${PYTHON_BIN:-python}"
-    MODEL_PATH="${MODEL_PATH:-models/Qwen2___5-Omni-7B}"
+    MODEL_PATH="${MODEL_PATH:-${MODEL:-models/Qwen2___5-Omni-7B}}"
     GPU_GROUPS="${GPU_GROUPS:-0;1;2;3}"
-    export PYTHONPATH="${ROOT_DIR}"
+    export PYTHONPATH="${ROOT_DIR}/third_party/sam2:${ROOT_DIR}:${PYTHONPATH:-}"
     ;;
   *) echo "FAMILY must be qwen3 or qwen2_5" >&2; exit 1 ;;
 esac
@@ -38,7 +66,7 @@ GENERATE_ARGS=(--family "${FAMILY}" --model "${MODEL_PATH}" --checkpoint "${CHEC
 if [[ -n "${VIDEO_FPS:-}" ]]; then GENERATE_ARGS+=(--video-fps "${VIDEO_FPS}"); fi
 SEGMENT_ARGS=(--checkpoint "${CHECKPOINT}" --splits "${SPLIT_ARGS[@]}"
   --device cuda:0 --cache-size "${CACHE_SIZE:-32}")
-if [[ "${SAVE_MASKS:-0}" == "1" ]]; then SEGMENT_ARGS+=(--save-masks); fi
+SEGMENT_ARGS+=(--save-masks)
 SHARD_DIRS=()
 for ((rank=0; rank<${#GROUPS_ARRAY[@]}; rank++)); do
   SHARD_DIRS+=("${OUTPUT_DIR}/shard-${rank}")

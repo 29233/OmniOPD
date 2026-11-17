@@ -70,24 +70,25 @@ mask paths.
 
 ## Full training entry point and checkpoints
 
-Use `scripts/sft/train_qwen2_5_omni_swift_sft.sh` for a full-data run. It defaults
-to `MAX_SAMPLES=-1`, `MAX_STEPS=-1` (the configured epoch count), 10 SAM frames,
-and saves/evaluates every 500 optimizer steps:
+Use `scripts/sft/train_qwen2_5_omni_swift_sft.sh` for a full-data Stage-1 run.
+It defaults to `MAX_SAMPLES=-1`, `MAX_STEPS=-1` (the configured epoch count),
+10 SAM frames, and saves/evaluates every 500 optimizer steps:
 
 ```bash
 NPROC_PER_NODE=8 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 bash scripts/sft/train_qwen2_5_omni_swift_sft.sh
 ```
 
-Override `SAVE_STEPS` to change the interval.
-
-The full entry point generates `outputs/data/refavs/refavs_val.jsonl` from the REF-AVS
-`val` split and passes it as `--val_dataset`. `eval_strategy=steps` and
-`eval_steps` follow `SAVE_STEPS` by default, so ms-swift evaluates at each
-interval before saving the matching checkpoint. With
-`predict_with_generate=True`, the validation pass is generation-based and the
-generated collection is written to `predict.jsonl`; set `EVAL_STEPS` to use a
-different evaluation cadence.
+Override `SAVE_STEPS`, `MODEL_PATH`, `AURORA_SAM_CHECKPOINT`, `TRAIN_JSONL` /
+`AURORA_DATA_JSONL`, or `VAL_JSONL` / `AURORA_VAL_JSONL` (or pass `DRY_RUN=1`
+to validate inputs without launching training). The launcher defaults to
+`outputs/data/refavs/refavs_train.jsonl` (falling back to `refavs_full.jsonl`
+if present) and `outputs/data/refavs/refavs_val.jsonl`, passing the validation
+manifest as `--val_dataset`. `eval_strategy=steps` and `eval_steps` follow
+`SAVE_STEPS` by default, so ms-swift evaluates at each interval before saving
+the matching checkpoint. With `predict_with_generate=True`, the validation pass
+is generation-based and the generated collection is written to `predict.jsonl`;
+set `EVAL_STEPS` to use a different evaluation cadence.
 
 TensorBoard logging is enabled by default with `--report_to tensorboard`.
 Logs are written below the run's `runs/` directory. Use `REPORT_TO=none` to

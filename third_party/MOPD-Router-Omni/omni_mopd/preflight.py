@@ -5,7 +5,6 @@ import argparse
 import hashlib
 import json
 import os
-import subprocess
 import sys
 from importlib.metadata import version
 from pathlib import Path
@@ -21,6 +20,16 @@ CORE = (
     "verl/verl/trainer/ppo/ray_trainer.py",
     "verl/verl/trainer/ppo/core_algos.py",
 )
+# Fixed upstream content hashes: the OmniOPD source distribution does not ship
+# the nested MOPD-Router Git history. Comparing against the parent repository
+# instead could silently verify the wrong project.
+UPSTREAM_CORE_SHA256 = {
+    "run.sh": "33f6d17dc5923247d3aab978c1294acec2db8a9fbe523a7db7264207d16ee558",
+    "verl/verl/workers/actor/dp_actor.py": "4db9af0a7337425b71ca0a15fb847e14d0e770c060cff2e97ee3ccdff726d905",
+    "verl/verl/utils/teacher_routing.py": "996c9bf32adeff61fdd2b12f356bc323f64bc2ba6abc3b1d04a24bc096feae45",
+    "verl/verl/trainer/ppo/ray_trainer.py": "ca8afb25438416e005852b48643d0458fdd5f40c565fcccf40046b2240db518c",
+    "verl/verl/trainer/ppo/core_algos.py": "e7817157e4f13e9f85d65321a9e81f5eef1cc9d18d70fe73ca54a2026213528c",
+}
 
 
 def digest(path):
@@ -38,11 +47,10 @@ def verify_native_core(repo):
         raise ValueError(f"Wrong verl imported (old migration/environment?): {verl.__file__}")
     result = {}
     for name in CORE:
-        original = subprocess.check_output(["git", "-C", str(repo), "show", f"{UPSTREAM}:{name}"])
-        actual = (repo / name).read_bytes()
-        if original != actual:
+        actual = digest(repo / name)
+        if actual != UPSTREAM_CORE_SHA256[name]:
             raise ValueError(f"Native routing/training core modified: {name}")
-        result[name] = hashlib.sha256(actual).hexdigest()
+        result[name] = actual
     return result
 
 
@@ -118,6 +126,7 @@ def check(out, *, repo=None):
         "optimizer": {"lr": float(os.environ.get("LEARNING_RATE", "1e-5")),
                       "scheduler": "constant", "reference_kl": False},
         "media": protocol | {"max_pixels": 200704, "max_length": 5120,
+                             "video_preprocessing": "swift_training_parity",
                              "max_prompt_length": 4864,
                              "max_response_length": 256, "compute_dtype": "bfloat16",
                              "actor_parameter_dtype": "float32",

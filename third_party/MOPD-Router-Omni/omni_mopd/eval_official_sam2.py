@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -18,8 +19,24 @@ from safetensors import safe_open
 from safetensors.torch import load_file
 from torch import nn
 
-from omni_mopd.data import OmniEncoder, audit_timing
-from omni_mopd.eval_official_language import sha
+
+def _add_import_paths() -> None:
+    mopd_root = Path(__file__).resolve().parents[1]
+    repo_root = Path(__file__).resolve().parents[3]
+    for candidate in (mopd_root, repo_root, repo_root / "third_party/sam2"):
+        if candidate.is_dir() and str(candidate) not in sys.path:
+            sys.path.insert(0, str(candidate))
+
+
+_add_import_paths()
+
+from omni_mopd.data import OmniEncoder
+from omni_mopd.eval_official_language import (
+    OFFICIAL_SPLIT_COUNTS,
+    verify_fsdp_snapshot,
+    verify_official_split_source,
+    verify_timing_audit,
+)
 from omni_mopd.modeling import extend_positions
 from swift_plugin.sam2_segmentation import AuroraSAM2VideoHead, preprocess_sam2_frames
 from swift_plugin.segmentation import load_gt_masks
@@ -27,10 +44,14 @@ from swift_plugin.sam2_grpo_rewards import (
     class_exact_score, class_name_from_sample_id, extract_target_class,
 )
 
-ROOT = Path(os.environ.get("AURORA_ROOT", str(Path(__file__).resolve().parents[3])))
-INITIALIZER = Path(os.environ.get("AURORA_SFT_INITIALIZER", str(ROOT / "outputs/train/sam2_merged_sft_3epoch_8gpu/checkpoint-4809")))
-BASE_SAM2 = Path(os.environ.get("AURORA_SAM2_CHECKPOINT", str(ROOT / "models/sam2_hiera_large.pt")))
-MODEL_TRAIN = Path(os.environ.get("AURORA_MOPD_TRAIN_DIR", str(ROOT / "outputs/train/clean_omni_mopd_8gpu")))
+ROOT = Path(os.environ.get("AURORA_ROOT") or str(Path(__file__).resolve().parents[3]))
+INITIALIZER = Path(os.environ.get("AURORA_SFT_INITIALIZER") or str(ROOT / "outputs/train/sam2_merged_sft_3epoch_8gpu/checkpoint-4809"))
+BASE_SAM2 = Path(
+    os.environ.get("AURORA_SAM2_CHECKPOINT")
+    or os.environ.get("SAM2_CHECKPOINT")
+    or str(ROOT / "models/sam2_hiera_large.pt")
+)
+MODEL_TRAIN = Path(os.environ.get("AURORA_MOPD_TRAIN_DIR") or str(ROOT / "outputs/train/clean_omni_mopd_8gpu"))
 
 def _mask_sample_dir_name(sample_id, index):
     safe = "".join(c if c.isascii() and (c.isalnum() or c in "._-") else "_"
@@ -38,25 +59,38 @@ def _mask_sample_dir_name(sample_id, index):
     return f"{index:06d}__{safe or 'unknown'}"
 
 
-def projector_and_sam(device):
-    config = json.loads((INITIALIZER / "aurora_projector_config.json").read_text())
-    if {k: config[k] for k in ("backend", "sam_frames", "model_timeline_fps", "input_hidden_size",
-                               "projector_hidden_size", "output_hidden_size")} != {
-        "backend": "sam2_video_memory", "sam_frames": 10, "model_timeline_fps": 1.,
-        "input_hidden_size": 3584, "projector_hidden_size": 1024, "output_hidden_size": 256,
-    }:
+def projector_and_sam(
+    device,
+    initializer: Path = INITIALIZER,
+    base_sam2: Path = BASE_SAM2,
+):
+    initializer = Path(initializer)
+    base_sam2 = Path(base_sam2)
+    config = json.loads((initializer / "aurora_projector_config.json").read_text())
+    required = {
+        "backend": "sam2_video_memory",
+        "sam_frames": 10,
+        "model_timeline_fps": 1.0,
+        "output_hidden_size": 256,
+    }
+    if any(config.get(k) != v for k, v in required.items()):
         raise ValueError("Trained projector contract differs from selected checkpoint")
+    input_hidden_size = int(config["input_hidden_size"])
+    projector_hidden_size = int(config["projector_hidden_size"])
+    output_hidden_size = int(config["output_hidden_size"])
     projector = nn.Sequential(
-        nn.Linear(3584, 1024), nn.ReLU(inplace=True), nn.Linear(1024, 256),
+        nn.Linear(input_hidden_size, projector_hidden_size),
+        nn.ReLU(inplace=True),
+        nn.Linear(projector_hidden_size, output_hidden_size),
         nn.Dropout(0.0),
     )
-    with safe_open(str(INITIALIZER / "adapter_model.safetensors"), framework="pt", device="cpu") as f:
+    with safe_open(str(initializer / "adapter_model.safetensors"), framework="pt", device="cpu") as f:
         state = {k.split(".text_hidden_fcs.", 1)[1]: f.get_tensor(k)
                  for k in f.keys() if ".text_hidden_fcs." in k}
     projector.load_state_dict(state, strict=True)
     projector.to(device).eval()
-    sam = AuroraSAM2VideoHead(str(BASE_SAM2), config["sam2_config"])
-    saved = load_file(INITIALIZER / "sam2_video_decoder.safetensors")
+    sam = AuroraSAM2VideoHead(str(base_sam2), config["sam2_config"])
+    saved = load_file(initializer / "sam2_video_decoder.safetensors")
     if len(saved) != 285:
         raise ValueError("Wrong trained SAM2 sidecar tensor count")
     sam.load_trainable_state_dict(saved)
@@ -82,28 +116,35 @@ def run(args):
     torch.cuda.set_device(device)
     if world > 1:
         dist.init_process_group("gloo")
-    snapshot = json.loads((args.checkpoint / "fsdp_snapshot_manifest.json").read_text())
-    if not snapshot["complete"] or snapshot["source_step"] != 500:
-        raise ValueError("Unverified/mismatched native checkpoint")
-    if Path(snapshot["source_checkpoint"]).parent.parent.resolve() != MODEL_TRAIN.resolve():
-        raise ValueError("Snapshot is not this run's native FSDP checkpoint")
-    if not snapshot["all_frozen_tensors_exact_after_dtype_cast"]:
-        raise ValueError("Frozen initializer weights differ")
-    timing = audit_timing(ROOT / "outputs/artifacts/refavs_fps_audit_20261025/audit.json")
-    saved_config = json.loads((MODEL_TRAIN / "global_step_500/actor/huggingface/config.json").read_text())
+    train_dir = getattr(args, "train_dir", None) or MODEL_TRAIN
+    initializer = getattr(args, "sft_initializer", None) or INITIALIZER
+    base_sam2 = getattr(args, "sam2_checkpoint", None) or BASE_SAM2
+    timing_audit = getattr(args, "timing_audit", None) or Path(
+        os.environ.get("OMNI_TIMING_AUDIT") or str(ROOT / "outputs/artifacts/refavs_fps_audit_20261025/audit.json")
+    )
+    verified = verify_fsdp_snapshot(
+        args.checkpoint,
+        train_dir,
+        expected_step=getattr(args, "expected_step", None),
+    )
+    snapshot = verified["snapshot"]
+    source_step = verified["source_step"]
+    video_preprocessing = verified["video_preprocessing"]
+    timing = verify_timing_audit(timing_audit)
+    saved_config = json.loads(verified["source_settings"].read_text())
     if saved_config.get("model_type") != "qwen2_5_omni_thinker" or saved_config.get("attn_implementation") != "sdpa":
         raise ValueError("Trained model type/SDPA differs")
-    source = ROOT / "outputs/data/refavs_official_template_matched_20261102" / f"refavs_{args.split}.jsonl"
-    rows = [json.loads(line) for line in source.open() if line.strip()]
-    full = {"test_s": 2288, "test_u": 1656}[args.split]
-    if len(rows) != full:
-        raise ValueError("Changed official split")
-    previous = json.loads((
-        ROOT / "outputs/eval/merged_sft_official_20261102_merged_v4_full/epoch3"
-        / args.split / "evaluation_manifest.json"
-    ).read_text())
-    if previous["source_sha256"] != sha(source):
-        raise ValueError("Official source SHA differs from initializer's evaluated split")
+    default_data_dir = Path(os.environ.get("AURORA_OFFICIAL_DATA_DIR") or str(ROOT / "outputs/data/refavs_official_template_matched_20261102"))
+    source = getattr(args, "source", None) or (default_data_dir / f"refavs_{args.split}.jsonl")
+    rows, source_provenance = verify_official_split_source(
+        source,
+        args.split,
+        root=ROOT,
+        expected_source=getattr(args, "expected_source", None),
+        reference_manifest=getattr(args, "reference_manifest", None),
+        media_manifest=getattr(args, "media_manifest", None),
+    )
+    full = OFFICIAL_SPLIT_COUNTS[args.split]
     if args.max_samples > 0:
         rows = rows[:args.max_samples]
     if rank == 0:
@@ -111,18 +152,19 @@ def run(args):
             raise ValueError("Refuse overwriting existing mask evaluation")
         args.output.mkdir(parents=True, exist_ok=False)
         manifest = {
-            "checkpoint": str(args.checkpoint.resolve()), "checkpoint_step": 500,
+            "checkpoint": str(args.checkpoint.resolve()), "checkpoint_step": source_step,
             "source_checkpoint": snapshot["source_checkpoint"],
             "split": args.split, "samples": len(rows),
             "full_official_split": len(rows) == full,
-            "source": str(source), "source_sha256": sha(source),
-            "training_config_source": str(
-                MODEL_TRAIN / "global_step_500/actor/huggingface/config.json"),
-            "training_launcher": str(ROOT / "third_party/MOPD-Router-Omni/run_omni.sh"),
-            "initializer_args": str(INITIALIZER / "args.json"),
-            "trained_mask_components": str(INITIALIZER),
-            "trained_mask_base": str(BASE_SAM2),
+            "source": str(Path(source).resolve()),
+            **source_provenance,
+            "training_config_source": str(verified["source_settings"]),
+            "training_launcher": str(Path(__file__).resolve().parents[1] / "run_omni.sh"),
+            "initializer_args": str(initializer / "args.json"),
+            "trained_mask_components": str(initializer),
+            "trained_mask_base": str(base_sam2),
             "model_timings": timing,
+            "video_preprocessing_source": str(train_dir / "omni_training_manifest.json"),
             "settings": {
                 "world_size": world, "max_pixels": 200704, "max_length": 5120,
                 "max_prompt_length": 4864, "response_length": 256,
@@ -130,13 +172,14 @@ def run(args):
                 "fps_max_frames": 768, "video_max_token_num": 768,
                 "image_max_token_num": 16384, "model_timeline_fps": 1.,
                 "sam_frames": 10, "template": "omni_mopd.data.render_prompt",
+                "video_preprocessing": video_preprocessing,
                 "audio": "original WAV", "decoding": "greedy",
                 "save_masks": True, "per_frame_metrics": True,
                 "mask_directory": str((args.output / "masks").resolve()),
             },
             "inference_differences": [
                 "greedy decoding versus stochastic temperature1/top_p1 native training rollout",
-                "frozen trained SFT4809 SAM2/projector reattached only for inference",
+                "frozen trained SAM2/projector reattached only for inference",
             ],
             "no_opd_matched_control": False, "opd_gain_claim": False,
         }
@@ -148,10 +191,12 @@ def run(args):
         args.checkpoint, torch_dtype=torch.bfloat16,
         attn_implementation="sdpa", local_files_only=True,
     ).to(device).eval()
-    projector, sam = projector_and_sam(device)
+    projector, sam = projector_and_sam(device, initializer=initializer, base_sam2=base_sam2)
+    input_hidden_size = int(projector[0].in_features)
     seg_id = processor.tokenizer.convert_tokens_to_ids("[SEG]")
     eos = processor.tokenizer.convert_tokens_to_ids("<|im_end|>")
-    encoder = OmniEncoder(processor, model.config, fps=1., max_pixels=200704)
+    encoder = OmniEncoder(processor, model.config, fps=1., max_pixels=200704,
+                          video_preprocessing=video_preprocessing)
     record_path = args.output / f"{args.split}.rank{rank}.jsonl"
     count = class_count = seg_count = 0
     sums = [0., 0.]
@@ -188,8 +233,8 @@ def run(args):
                                    ).transpose(0, 1))
                     output = model(**forward, output_hidden_states=True, use_cache=False)
                     hidden = output.hidden_states[-1][full_ids.eq(seg_id)]
-                    if hidden.shape != (1, 3584):
-                        raise ValueError(f"Expected one 3584D native SEG state, got {hidden.shape}")
+                    if hidden.shape != (1, input_hidden_size):
+                        raise ValueError(f"Expected one {input_hidden_size}D native SEG state, got {hidden.shape}")
                     prompt = projector(hidden.to(next(projector.parameters()).dtype))[0]
                     images, _, sizes = preprocess_sam2_frames(row["sam_frame_paths"], 10)
                     truth = load_gt_masks(row["mask_paths"], sizes[0], 10).to(device)
@@ -245,7 +290,7 @@ def run(args):
         if summary["samples"] != len(rows) or summary["errors"]:
             raise RuntimeError("Incomplete full-split segmentation evaluation")
         summary.update(
-            split=args.split, checkpoint_step=500,
+            split=args.split, checkpoint_step=source_step,
             full_official_split=len(rows) == full,
             mean_iou_all=summary["iou_sum"] / summary["samples"],
             mean_dice_all=summary["dice_sum"] / summary["samples"],
@@ -260,9 +305,18 @@ def run(args):
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser()
+    p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--checkpoint", required=True, type=Path)
     p.add_argument("--output", required=True, type=Path)
     p.add_argument("--split", required=True, choices=("test_s", "test_u"))
     p.add_argument("--max-samples", type=int, default=-1)
+    p.add_argument("--source", type=Path, default=None)
+    p.add_argument("--train-dir", type=Path, default=MODEL_TRAIN)
+    p.add_argument("--sft-initializer", type=Path, default=INITIALIZER)
+    p.add_argument("--sam2-checkpoint", type=Path, default=BASE_SAM2)
+    p.add_argument("--timing-audit", type=Path, default=None)
+    p.add_argument("--expected-source", type=Path, default=None)
+    p.add_argument("--reference-manifest", type=Path, default=None)
+    p.add_argument("--media-manifest", type=Path, default=None)
+    p.add_argument("--expected-step", type=int, default=None)
     run(p.parse_args())

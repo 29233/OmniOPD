@@ -3,14 +3,27 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import sys
 from pathlib import Path
 
 import torch
 from transformers import Qwen2_5OmniProcessor, Qwen2_5OmniThinkerForConditionalGeneration
 
+
+def _add_import_paths() -> None:
+    mopd_root = Path(__file__).resolve().parents[1]
+    repo_root = Path(__file__).resolve().parents[3]
+    for candidate in (mopd_root, repo_root, repo_root / "third_party/sam2"):
+        if candidate.is_dir() and str(candidate) not in sys.path:
+            sys.path.insert(0, str(candidate))
+
+
+_add_import_paths()
+
 from omni_mopd.data import OmniEncoder
 from omni_mopd.eval_official_sam2 import (
-    INITIALIZER, ROOT, frame_metric, projector_and_sam,
+    BASE_SAM2, INITIALIZER, ROOT, frame_metric, projector_and_sam,
 )
 from omni_mopd.modeling import extend_positions
 from swift_plugin.sam2_segmentation import preprocess_sam2_frames
@@ -21,24 +34,55 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--count", type=int, default=8)
+    parser.add_argument(
+        "--model",
+        type=Path,
+        default=Path(os.environ.get("AURORA_SFT_EXPORT") or str(ROOT / "outputs/models/mopd_omni_reasoning/sft4809_v2")),
+    )
+    parser.add_argument(
+        "--source",
+        type=Path,
+        default=Path(os.environ.get("AURORA_OFFICIAL_TEST_S") or str(ROOT / "outputs/data/refavs_official_template_matched_20261102/refavs_test_s.jsonl")),
+    )
+    parser.add_argument(
+        "--baseline",
+        type=Path,
+        default=Path(os.environ.get("AURORA_SWIFT_SFT_BASELINE") or str(ROOT / "outputs/eval/mask_primary_sft_control_20261104_v1/test_s/test_s.jsonl")),
+    )
+    parser.add_argument("--sft-initializer", type=Path, default=INITIALIZER)
+    parser.add_argument("--sam2-checkpoint", type=Path, default=BASE_SAM2)
     args = parser.parse_args()
     if args.count < 1 or args.count > 16:
         raise ValueError("Sanity check restricted to <=16 official test_s examples")
-    model_path = ROOT / "outputs/models/mopd_omni_reasoning/sft4809_v2"
+    model_path = args.model
     if not (model_path / "omni_export_manifest.json").exists():
-        raise FileNotFoundError("Missing trained-SFT native export")
+        raise FileNotFoundError(f"Missing trained-SFT native export: {model_path}")
     processor = Qwen2_5OmniProcessor.from_pretrained(model_path, local_files_only=True)
     device = torch.device("cuda")
     model = Qwen2_5OmniThinkerForConditionalGeneration.from_pretrained(
         model_path, torch_dtype=torch.bfloat16, attn_implementation="sdpa",
         local_files_only=True,
     ).to(device).eval()
-    projector, sam = projector_and_sam(device)
+    projector, sam = projector_and_sam(
+        device, initializer=args.sft_initializer, base_sam2=args.sam2_checkpoint
+    )
     encoder = OmniEncoder(processor, model.config, fps=1., max_pixels=200704)
-    source = ROOT / "outputs/data/refavs_official_template_matched_20261102/refavs_test_s.jsonl"
-    baseline = ROOT / "outputs/eval/mask_primary_sft_control_20261104_v1/test_s/test_s.jsonl"
+    source = args.source
+    baseline = args.baseline
+    if not source.is_file():
+        raise FileNotFoundError(f"Missing test_s source JSONL: {source}")
+    if not baseline.is_file():
+        raise FileNotFoundError(f"Missing Swift SFT reference baseline JSONL: {baseline}")
     rows = [json.loads(l) for _, l in zip(range(args.count), source.open())]
     reference = [json.loads(l) for _, l in zip(range(args.count), baseline.open())]
+    if len(rows) < args.count or len(reference) < args.count:
+        raise ValueError("Source or baseline JSONL has fewer rows than --count")
+    for index, (row, ref) in enumerate(zip(rows, reference)):
+        if row.get("sample_id") != ref.get("sample_id"):
+            raise ValueError(
+                f"Source/baseline sample_id mismatch at index {index}: "
+                f"{row.get('sample_id')!r} != {ref.get('sample_id')!r}"
+            )
     results = []
     seg_id = processor.tokenizer.convert_tokens_to_ids("[SEG]")
     eos = processor.tokenizer.convert_tokens_to_ids("<|im_end|>")
@@ -85,7 +129,7 @@ def main():
     args.out.write_text(json.dumps({
         "scope": "SFT native+frozen trained SAM2 vs prior official Swift SFT; first "
                  f"{args.count} test_s cases only; not gain evidence",
-        "native_model": str(model_path), "swift_checkpoint": str(INITIALIZER),
+        "native_model": str(model_path), "swift_checkpoint": str(args.sft_initializer),
         "media": "same ten stored frames and original WAV",
         "intended_inference_differences": [
             "native HF mRoPE instead of historical Swift pre-forward-hook",

@@ -344,7 +344,12 @@ class AuroraIoUORM:
             try:
                 iou = _completion_iou(trainer, msg, fr, mp, au, num_frames)
                 rewards.append(0.0 if iou is None else iou)
-            except Exception as exc:  # never kill training on a reward crash
+            except Exception as exc:
+                # An unreachable SAM service is not a zero-IoU example.
+                # Fail closed by default, so missing verifiable rewards
+                # cannot silently masquerade as a successful GRPO run.
+                if os.environ.get("AURORA_GRPO_REWARD_FAIL_OPEN", "0") != "1":
+                    raise RuntimeError("SAM IoU reward failed; refusing an invalid GRPO update") from exc
                 if os.environ.get("AURORA_GRPO_DEBUG", "0") == "1":
                     import traceback
                     traceback.print_exc()

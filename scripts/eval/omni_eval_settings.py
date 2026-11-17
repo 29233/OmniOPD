@@ -1,4 +1,5 @@
 """Check evaluation preprocessing against the selected dual OPSD training run."""
+import argparse
 import json
 import math
 import wave
@@ -96,3 +97,39 @@ def validate_training_settings(checkpoint, environment, *, torch_dtype, max_pixe
                 ('FPS_MAX_FRAMES', 'VIDEO_MAX_TOKEN_NUM', 'IMAGE_MAX_TOKEN_NUM') if key not in launch],
             'decoding': 'Greedy evaluation; training rollouts used sampling.',
             'audio': 'Original test audio; audio degradation is a separate robustness evaluation.'}
+
+
+def main() -> None:
+    """CLI entrypoint to inspect REF-AVS split FPS and emit an audit JSON."""
+    parser = argparse.ArgumentParser(
+        description='Inspect REF-AVS frame lists and WAV durations to emit dataset timing audit JSON.'
+    )
+    parser.add_argument(
+        '--data-dir',
+        type=Path,
+        required=True,
+        help='Directory containing refavs_<split>.jsonl manifests.',
+    )
+    parser.add_argument(
+        '--splits',
+        nargs='+',
+        default=['test_s', 'test_u'],
+        help='Dataset splits to inspect (default: test_s test_u).',
+    )
+    parser.add_argument(
+        '--output',
+        type=Path,
+        default=None,
+        help='Optional output path to write formatted audit JSON (creates parent dirs).',
+    )
+    args = parser.parse_args()
+    report = inspect_refavs_fps(args.data_dir, splits=tuple(args.splits))
+    payload = json.dumps(report, ensure_ascii=False, indent=2) + '\n'
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(payload, encoding='utf-8')
+    print(payload, end='', flush=True)
+
+
+if __name__ == '__main__':
+    main()

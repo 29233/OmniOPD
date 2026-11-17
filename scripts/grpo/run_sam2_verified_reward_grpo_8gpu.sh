@@ -5,9 +5,40 @@ set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT_DIR}"
 export PYTHONUTF8=1 LANG=C.UTF-8 LC_ALL=C.UTF-8
-SWIFT_ENV="${SWIFT_ENV:-${CONDA_PREFIX:-/usr/local}}"
-SWIFT_BIN="${SWIFT_BIN:-${SWIFT_ENV}/bin/swift}"
-PYTHON_BIN="${PYTHON_BIN:-${SWIFT_ENV}/bin/python}"
+if [[ "${OMNIOPD_LOAD_ENV:-0}" == "1" && -f "${ROOT_DIR}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${ROOT_DIR}/.env"
+  set +a
+fi
+if [[ -z "${SWIFT_ENV:-}" ]]; then
+  if [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/python" ]]; then
+    SWIFT_ENV="${VIRTUAL_ENV}"
+  elif [[ -n "${CONDA_PREFIX:-}" && "${CONDA_DEFAULT_ENV:-base}" != "base" && -x "${CONDA_PREFIX}/bin/python" ]]; then
+    SWIFT_ENV="${CONDA_PREFIX}"
+  elif [[ -x "${ROOT_DIR}/.venv/bin/python" ]]; then
+    SWIFT_ENV="${ROOT_DIR}/.venv"
+  fi
+fi
+if [[ -z "${PYTHON_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/python" ]]; then
+    PYTHON_BIN="${SWIFT_ENV}/bin/python"
+  else
+    PYTHON_BIN="$(command -v python3 || command -v python || true)"
+  fi
+elif [[ "${PYTHON_BIN}" != */* ]]; then
+  PYTHON_BIN="$(command -v "${PYTHON_BIN}" || true)"
+fi
+if [[ -z "${SWIFT_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/swift" ]]; then
+    SWIFT_BIN="${SWIFT_ENV}/bin/swift"
+  else
+    SWIFT_BIN="$(command -v swift || true)"
+  fi
+elif [[ "${SWIFT_BIN}" != */* ]]; then
+  SWIFT_BIN="$(command -v "${SWIFT_BIN}" || true)"
+fi
+export SWIFT_ENV PYTHON_BIN SWIFT_BIN
 MODEL="${MODEL:-models/Qwen2___5-Omni-7B}"
 SFT_CHECKPOINT="${SFT_CHECKPOINT:-${ROOT_DIR}/outputs/train/qwen2_5_omni_7b_sam2_joint_sft_20261030_v2_3epoch/v0-20261029-184656/checkpoint-3825}"
 DATA_ROOT="${DATA_ROOT:?Set DATA_ROOT to refreshed verified-OPD data}"
@@ -22,12 +53,14 @@ SAM2_CONFIG="${SAM2_CONFIG:-configs/sam2/sam2_hiera_l.yaml}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 IFS=',' read -r -a DEVICES <<< "${CUDA_VISIBLE_DEVICES}"
 [[ "${#DEVICES[@]}" -eq 8 ]] || { echo "Reward-only GRPO requires eight GPUs" >&2; exit 2; }
-export PYTHONPATH="${ROOT_DIR}/third_party/sam2_runtime_deps:${ROOT_DIR}/third_party/sam2:${ROOT_DIR}:${PYTHONPATH:-}"
+export PYTHONPATH="${ROOT_DIR}/third_party/sam2:${ROOT_DIR}:${PYTHONPATH:-}"
 export AURORA_SEG_BACKEND=sam2 AURORA_SAM2_CHECKPOINT="${SAM2_CHECKPOINT}" AURORA_SAM2_CONFIG="${SAM2_CONFIG}"
-export DATASET_VIDEO_FPS=1.0 FPS=1.0 AURORA_VIDEO_FPS=1.0
-export FPS_MAX_FRAMES=768 VIDEO_MAX_TOKEN_NUM=768 IMAGE_MAX_TOKEN_NUM=16384
+export DATASET_VIDEO_FPS="${DATASET_VIDEO_FPS:-1.0}"
+export FPS="${FPS:-1.0}"
+export AURORA_VIDEO_FPS="${AURORA_VIDEO_FPS:-${FPS}}"
+export FPS_MAX_FRAMES="${FPS_MAX_FRAMES:-768}" VIDEO_MAX_TOKEN_NUM="${VIDEO_MAX_TOKEN_NUM:-768}" IMAGE_MAX_TOKEN_NUM="${IMAGE_MAX_TOKEN_NUM:-16384}"
 export AURORA_NUM_SAM_FRAMES=10 AURORA_PROJECTOR_HIDDEN_SIZE=1024 AURORA_PROJECTOR_LAYER_NORM=0
-export ENABLE_AUDIO_OUTPUT=0 USE_AUDIO_IN_VIDEO=0 TOKENIZERS_PARALLELISM=false AURORA_GRPO_REWARD_FAIL_OPEN=0
+export ENABLE_AUDIO_OUTPUT=0 USE_AUDIO_IN_VIDEO=0 TOKENIZERS_PARALLELISM=false AURORA_GRPO_REWARD_FAIL_OPEN="${AURORA_GRPO_REWARD_FAIL_OPEN:-0}"
 
 MAX_STEPS="${MAX_STEPS:-100}"
 SAVE_STEPS="${SAVE_STEPS:-25}"
@@ -42,10 +75,10 @@ DATA_SEED="${DATA_SEED:-${TRAIN_SEED}}"
 MASTER_PORT="${MASTER_PORT:-29634}"
 export SFT_CHECKPOINT MAX_STEPS LEARNING_RATE REFERENCE_KL_BETA NUM_GENERATIONS MAX_COMPLETION_LENGTH TRAIN_SEED DATA_SEED
 
-for path in "${MODEL}/config.json" "${SFT_CHECKPOINT}/adapter_model.safetensors" \
+for path in "${PYTHON_BIN}" "${SWIFT_BIN}" "${MODEL}/config.json" "${SFT_CHECKPOINT}/adapter_model.safetensors" \
   "${SFT_CHECKPOINT}/sam2_video_decoder.safetensors" "${TRAIN_JSONL}" \
   "${DATA_MANIFEST}" "${SAM2_CHECKPOINT}"; do
-  [[ -e "${path}" ]] || { echo "Missing reward-only requirement: ${path}" >&2; exit 1; }
+  [[ -n "${path}" && -e "${path}" ]] || { echo "Missing reward-only requirement: ${path:-<empty>}" >&2; exit 1; }
 done
 mkdir -p "${OUTPUT_DIR}"
 "${PYTHON_BIN}" - "${OUTPUT_DIR}/training_manifest.json" "${DATA_MANIFEST}" <<'PY'

@@ -522,7 +522,9 @@ def segment_stage(args):
                         target = load_gt_masks(row.get("mask_paths") or [], original[0], config["num_frames"]).to(device)
                         metrics = [_frame_metrics(p, t) for p, t in zip(prediction, target)]
                         result.update(status="ok", iou=sum(v[0] for v in metrics) / len(metrics),
-                                      dice=sum(v[1] for v in metrics) / len(metrics), frames_scored=len(metrics))
+                                      dice=sum(v[1] for v in metrics) / len(metrics), frames_scored=len(metrics),
+                                      frame_ious=[v[0] for v in metrics],
+                                      frame_dices=[v[1] for v in metrics])
                         if args.save_masks:
                             from PIL import Image
                             mask_dir = args.output / "masks" / split / f"{case_index:08d}"
@@ -531,6 +533,10 @@ def segment_stage(args):
                             for frame_index, mask in enumerate(masks):
                                 Image.fromarray(mask).save(mask_dir / f"{frame_index:02d}.png")
                             result["mask_dir"] = str(mask_dir.relative_to(args.output))
+                            result["mask_paths"] = [
+                                str((mask_dir / f"{frame_index:02d}.png").relative_to(args.output))
+                                for frame_index in range(len(masks))
+                            ]
                 except Exception as exc:
                     result.update(status="error", iou=0.0, dice=0.0, error=f"{type(exc).__name__}: {exc}")
                 if device.type == "cuda":
@@ -626,7 +632,8 @@ def main():
     segment.add_argument("--splits", nargs="+")
     segment.add_argument("--device", default="cuda:0")
     segment.add_argument("--cache-size", type=int, default=32, help="LRU clips in GPU memory; 0 disables caching")
-    segment.add_argument("--save-masks", action="store_true")
+    segment.add_argument("--save-masks", action="store_true", default=True,
+                         help="Mandatory for SAM evaluation: save every predicted frame mask")
     summarize = sub.add_parser("summarize", help="Aggregate all shard summaries with weighted metrics")
     summarize.add_argument("--inputs", type=Path, nargs="+", required=True)
     summarize.add_argument("--output", type=Path, required=True)

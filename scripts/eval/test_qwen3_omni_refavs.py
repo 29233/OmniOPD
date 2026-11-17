@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 import time
 import traceback
@@ -24,6 +25,13 @@ import torch
 
 def _root() -> Path:
     return Path(__file__).resolve().parents[2]
+
+
+def _add_import_paths() -> None:
+    root = _root()
+    for candidate in (root, root / "third_party/sam2"):
+        if candidate.is_dir() and str(candidate) not in sys.path:
+            sys.path.insert(0, str(candidate))
 
 
 def _prepare_adapter_for_eval(checkpoint: Path) -> tuple[Path, tempfile.TemporaryDirectory | None]:
@@ -377,6 +385,7 @@ def _aurora_mask_scores(engine, row, response):
 
 
 def main() -> None:
+    _add_import_paths()
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
@@ -404,7 +413,11 @@ def main() -> None:
     os.environ.setdefault("FPS_MAX_FRAMES", "10")
     os.environ.setdefault("VIDEO_MAX_TOKEN_NUM", "128")
     os.environ.setdefault("IMAGE_MAX_TOKEN_NUM", "1024")
-    os.environ.setdefault("AURORA_SAM_CHECKPOINT", "models/sam_vit_h_4b8939.pth")
+    default_sam = _root() / "models/sam_vit_h_4b8939.pth"
+    os.environ.setdefault(
+        "AURORA_SAM_CHECKPOINT",
+        str(default_sam) if default_sam.is_file() else "models/sam_vit_h_4b8939.pth",
+    )
     os.environ.setdefault("AURORA_NUM_SAM_FRAMES", "10")
     os.environ.setdefault("AURORA_VIDEO_FPS", "1.0")
 
