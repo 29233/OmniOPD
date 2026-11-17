@@ -25,33 +25,34 @@ This directory organizes all data preparation, training, evaluation, and utility
 
 ```text
 scripts/
-├── data/    # Dataset conversion, CoT synthesis, audio degradation, and privilege preparation
+├── setup/   # Dependency-free repo doctor, ms-swift v4.5.2 bootstrap & patch, observed requirements
+├── data/    # Dataset conversion, media-path relocation, audio degradation, and privilege preparation
 ├── sft/     # Stage-1 / Stage-2 / SAM2 supervised fine-tuning (SFT) launchers
 ├── grpo/    # GRPO reinforcement learning launchers and SAM IoU reward server
 ├── opd/     # On-Policy Self-Distillation (OPSD) and Verified Routed / Online OPD launchers
-├── eval/    # Official Ref-AVS evaluation and two-stage batch evaluation entrypoints
+├── eval/    # Official Ref-AVS evaluation, timing audit CLI, and two-stage batch evaluation entrypoints
 ├── utils/   # Model weight export tools and upstream model helpers
 └── docs/    # Algorithm design notes and usage guides for each training/eval recipe
 ```
 
+## 0. `scripts/setup/` — Environment Bootstrap & Checkout Audit
+- `repo_doctor.py`: Dependency-free (`python3 -S`) checkout, Python `compile()`, shell `bash -n`, launcher override, and doc-link audit.
+- `bootstrap_ms_swift.sh`: Fetches `ms-swift` `v4.5.2`, applies `ms-swift-v4.5.2-teacher-adapters.patch`, optionally installs observed/framework/SAM2 deps (`--install-deps`), and editable-installs `third_party/ms-swift`.
+- `requirements_swift_observed_20261117.txt`, `requirements_sam2_runtime.txt`, `requirements_mopd_overlay_observed_20261116.txt`: Observed dependency pins (keep Swift `numpy==2.1.3` separate from MOPD `numpy==1.26.4`).
+
 ## 1. `scripts/data/` — Data & Privilege Preparation
-- **Base SFT / SAM2 / GRPO Data**:
+- **Included Base / Relocation / GRPO / OPD Data Helpers**:
+  - `relocate_media_paths.py`: Relocate media paths in reviewed JSONLs to a local REFAVS root with fail-closed checks and `.media_manifest.json` provenance.
   - `prepare_refavs_swift_sft.py`: Convert raw REF-AVS splits (`train`, `val`, `test_s`, `test_u`, `test_n`) into `ms-swift` JSONL manifests.
-  - `prepare_merged_sft_dataset.py`: Merge reviewed audio-related and non-audio structured CoT annotations.
   - `prepare_sft_distributed_padding.py`: Pad SFT manifests for exact multi-GPU DDP rank partitioning.
-  - `prepare_sam2_sft_initializer.py`: Initialize SAM2 video-memory weights alongside a trained language adapter.
   - `prepare_sam2_grpo_data.py`: Build prompt-only GRPO training and validation manifests.
-- **OPSD & Multi-Privilege OPD Data**:
   - `degrade_refavs_audio.py` & `prepare_opsd_audio_condition.py`: Generate deterministic noise-degraded or block-muted audio for clean-audio privilege distillation.
   - `prepare_refavs_opsd.py` & `prepare_dual_opsd_audio_class.py`: Build single-privilege and dual audio/class OPSD manifests.
-  - `prepare_refavs_visual_opsd.py`: Build visual/mask privileged OPSD manifests.
-  - `prepare_privileged_top10_opd.py` & `prepare_sam2_privileged_top10_opd_full.py`: Prepare audio/visual text-privileged sparse top-10% OPD manifests.
-  - `prepare_verified_opd_probe_conditions.py`, `prepare_verified_routed_opd_data.py`, `prepare_student_only_opd_data.py`, `prepare_merged_opd_source.py`: Build empirical difficulty mixtures and verified routed / student-only online OPD datasets.
-- **Structured CoT & Privilege Synthesis**:
-  - `generate_refavs_structured_cot.py` & `check_refavs_structured_cot.py`: Synthesize and validate 6-stage structured CoT annotations.
-  - `generate_non_audio_answer_cot.py`: Synthesize answer-conditioned CoT for non-audio referring expressions.
-  - `generate_refavs_clip_audio_privilege.py` & `generate_refavs_first_mask_visual_privilege.py`: Generate clip-level audio evidence and first-frame visual privilege descriptions.
-  - `call_doubao_video.py`, `match_refavs_templates.py`, `refavs_audio_keyword_policy.py`: Shared video API client, template matcher, and acoustic keyword policy utilities.
+  - `prepare_sam2_privileged_top10_opd_full.py`: Merge audio/visual text-privileged sparse top-10% OPD manifests.
+  - `prepare_verified_routed_opd_data.py`, `prepare_student_only_opd_data.py`, `audit_verified_opd_probe_refresh.py`: Build/audit empirical difficulty mixtures and verified routed / student-only online OPD datasets.
+- **Historical Synthesis Scripts (not in this trimmed checkout)**:
+  - `[historical-only]` `prepare_merged_sft_dataset.py`, `prepare_sam2_sft_initializer.py`, `prepare_refavs_visual_opsd.py`, `prepare_privileged_top10_opd.py`, `prepare_verified_opd_probe_conditions.py`, `prepare_merged_opd_source.py`.
+  - `[historical-only]` `generate_refavs_structured_cot.py`, `check_refavs_structured_cot.py`, `generate_non_audio_answer_cot.py`, `generate_refavs_clip_audio_privilege.py`, `generate_refavs_first_mask_visual_privilege.py`, `call_doubao_video.py`, `match_refavs_templates.py`, `refavs_audio_keyword_policy.py`.
 
 ## 2. `scripts/sft/` — Supervised Fine-Tuning (SFT)
 - `train_qwen2_5_omni_swift_sft.sh`: Qwen2.5-Omni (3B/7B) + SAM (ViT-H) joint Stage-1 SFT.
@@ -86,7 +87,8 @@ scripts/
 - `test_qwen3_omni_refavs.py`: Official Qwen3-Omni-30B evaluator.
 - `test_videollama2_refavs.py` & `test_videollama2_refavs_sam.py`: VideoLLaMA2 evaluators.
 - `eval_omni_two_stage.py` & `eval_omni_two_stage.sh`: Two-stage batch LLM `[SEG]` embedding capture + standalone SAM segmentation.
-- `omni_eval_settings.py`: Training/evaluation media and preprocessing parity verifier.
+- `omni_eval_settings.py`: Training/evaluation media and preprocessing parity verifier, plus CLI (`--data-dir`, `--splits`, `--output`) to generate a local `audit.json`.
+- `audit_llm_template.py` & `audit_native_generation.py`: Template tokenization and native generation parity diagnostics.
 
 ## 6. `scripts/utils/` & `scripts/docs/`
 - `utils/export_sam_weights.py`: Export standalone SAM decoder and projector weights.

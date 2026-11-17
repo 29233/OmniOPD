@@ -1,8 +1,12 @@
 # Direct runtime packages observed in the isolated ms-swift SFT/GRPO/OPD
 # verification environment on 2026-11-17 (Asia/Shanghai).
-# Not a full transitive freeze; install CUDA-matched torch 2.7.1, torchvision
-# 0.22.1 and torchaudio 2.7.1 as a group on the target platform separately.
-# Install the patched ms-swift source via bootstrap_ms_swift.sh --no-deps.
+# Not a full transitive freeze; install CUDA-matched torch==2.7.1,
+# torchvision==0.22.1, and torchaudio==2.7.1 as a group on the target platform
+# first, then run:
+#   bash scripts/setup/bootstrap_ms_swift.sh --install-deps
+# which installs this file, ms-swift's framework.txt (constrained by these pins),
+# scripts/setup/requirements_sam2_runtime.txt, and patched ms-swift v4.5.2.
+# (Use --no-deps if these dependencies are already pre-installed.)
 numpy==2.1.3
 transformers==5.16.1
 tokenizers==0.23.1

@@ -10,4 +10,4 @@ export TRAIN_JSONL="${TRAIN_JSONL:-${ROOT_DIR}/outputs/data/refavs/refavs_full_o
 export VAL_JSONL="${VAL_JSONL:-${ROOT_DIR}/outputs/data/refavs/refavs_val_opsd_first_mask.jsonl}"
 export OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/outputs/train/opsd_first_mask_r1}"
 
-exec bash "${ROOT_DIR}/scripts/opd/train_opsd_swift.sh"
+exec bash "${ROOT_DIR}/scripts/opd/train_opsd_swift.sh" "$@"

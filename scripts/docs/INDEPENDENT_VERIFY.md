@@ -7,32 +7,38 @@ step or a complete official-split evaluation has succeeded.
 
 ## Dependencies
 
-Use a Python 3.10 CUDA environment. The historical
-`requirements_ms_swift.txt` pins **Transformers 4.57.6** and is NOT the
-environment used for this checkout's 2026-11-16 smoke. Versions actually
-observed for the ms-swift runtime are in
+Use an isolated Python 3.10 CUDA environment. The historical
+`requirements_ms_swift.txt` is legacy-only (pins **Transformers 4.57.6**) and is
+NOT the environment used for this checkout's 2026-11-16/17 runtime. Versions
+actually observed for the ms-swift runtime are in
 `scripts/setup/requirements_swift_observed_20261117.txt`; the separate
 `scripts/setup/requirements_mopd_overlay_observed_20261116.txt` records
-native MOPD's overlay. Install
-matching CUDA torch/vision/audio wheels for your GPU and the SAM2 dependencies
-from `scripts/setup/requirements_sam2_runtime.txt`. That tested-version list
-documents core versions; it is not a complete lockfile for every transitive
-media dependency. Then run
-`PYTHON_BIN=/absolute/path/to/venv/bin/python bash scripts/setup/bootstrap_ms_swift.sh`
+native MOPD's overlay (separate `numpy==1.26.4` vs Swift `numpy==2.1.3`).
+Install matching CUDA `torch==2.7.1`, `torchvision==0.22.1`, and
+`torchaudio==2.7.1` wheels for your GPU, then run:
+`bash scripts/setup/bootstrap_ms_swift.sh --install-deps`
+(or `--no-deps` when `requirements_swift_observed_20261117.txt`,
+`third_party/ms-swift/requirements/framework.txt`, and
+`scripts/setup/requirements_sam2_runtime.txt` are already installed)
 to obtain a local v4.5.2 ms-swift checkout patched for frozen teacher adapters.
 Do not use a mixture of ms-swift 3.x and 4.x on `PYTHONPATH`.
 
-Export `PYTHONPATH="$PWD/third_party/sam2:$PWD"`. This makes both `sam2`
-and `model.segment_anything` resolve to code **inside this checkout**. Supply
-`MODEL`, `SAM2_CHECKPOINT`, `SFT_CHECKPOINT`, `DATA_ROOT`, and `OUTPUT_DIR`
-explicitly for the recipe chosen. `MODEL` and `SAM2_CHECKPOINT` point to
-external weights, not Python source. For native MOPD, use its *separate*
-requirements, launcher and three independent teachers documented in
-`third_party/MOPD-Router-Omni/OMNI_MIGRATION.md`.
+Launchers auto-detect `.venv` and export `PYTHONPATH="$PWD/third_party/sam2:$PWD"`.
+When invoking Python scripts directly from custom environments, keep
+`PYTHONPATH="$PWD/third_party/sam2:$PWD"` (standalone entrypoints also insert
+repo and `third_party/sam2` paths automatically). Supply `MODEL`,
+`SAM2_CHECKPOINT`, `SFT_CHECKPOINT`, `DATA_ROOT`, `DATASET_AUDIT` (generated
+locally via `python scripts/eval/omni_eval_settings.py --data-dir <dir> --splits test_s test_u --output outputs/artifacts/audit.json`),
+and `OUTPUT_DIR` explicitly or via `.env` (`OMNIOPD_LOAD_ENV=1`). `MODEL` and
+`SAM2_CHECKPOINT` point to external weights, not Python source. For native MOPD,
+use its *separate* requirements, launcher and three independent teachers
+documented in `third_party/MOPD-Router-Omni/OMNI_MIGRATION.md`.
 
 ## CPU/source checks
 
 ```bash
+python3 -S scripts/setup/repo_doctor.py --strict
+python3 -S -m unittest discover -s tests -p 'test_repository_contract.py' -v
 PYTHONPATH="$PWD/third_party/sam2:$PWD" python -m unittest discover \
   -s tests -p 'test_independent_core.py' -v
 cd third_party/MOPD-Router-Omni

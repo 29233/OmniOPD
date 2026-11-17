@@ -5,37 +5,43 @@ REF-AVS. The paths below identify assets available on the current training
 machine; they are not portable paths or a promise that these assets may be
 publicly redistributed. Review rights and access before making a bundle.
 
-## 0. Current release blockers (fix before inviting collaborators)
+## 0. Current release blockers & portability status
 
-1. **Use a reviewed revision of the tested code.** Confirm that the chosen
-   checkout contains `scripts/data/`, vendored SAM/SAM2 and `verl/models`,
-   ms-swift bootstrap, reward fail-closed checks, checkpoint/template parity
-   and native MOPD media preprocessing. A branch or open PR is not necessarily
-   in the default branch; record its commit ID and merge intentionally.
-2. **Choose the project's own license.** There is no top-level `LICENSE`.
-   Keep the separate `third_party/MOPD-Router-Omni/LICENSE`,
+1. **Publish the reviewed revision to the default branch (`origin/HEAD`).**
+   Confirm that the default branch (`main`) on `origin` includes the reviewed
+   portability fixes, `scripts/data/`, vendored SAM/SAM2 and `verl/models`,
+   `bootstrap_ms_swift.sh --install-deps`, reward fail-closed checks,
+   checkpoint/template parity, and native MOPD media preprocessing. Until the
+   collaboration branch is merged to `main`, a default `git clone` gets the
+   older initial commit.
+2. **Choose the project's own license (still external / open).** There is no
+   top-level `LICENSE`. Keep the separate `third_party/MOPD-Router-Omni/LICENSE`,
    `third_party/MOPD-Router-Omni/verl/LICENSE`,
    `third_party/sam2/LICENSE`, and `model/segment_anything/LICENSE` with the
    included code. Do not assume that a dependency's license licenses this
    project's code or its training data.
-3. **Control data/model access separately.** REF-AVS dataset terms,
-   pretrained model-card terms and rights to redistribute synthetic CoT/
-   audio captions must be checked independently. Prefer an access-controlled
-   data store or an official dataset download over committing media to Git.
-4. **Restore or clearly de-scope data synthesis.** `scripts/README.md`
-   still describes historical optional scripts absent from this trimmed
+3. **Control data/model access separately (external by design).** REF-AVS
+   dataset terms, pretrained model-card terms, and rights to redistribute
+   synthetic CoT / audio captions must be checked independently. Supply media
+   and weights via an access-controlled store rather than committing them to Git.
+4. **Data synthesis scripts (external / unbundled).** `scripts/README.md`
+   documents 14 historical optional synthesis scripts absent from this trimmed
    checkout (including merged-SFT generation and several privilege synthesis
-   steps). The current reviewed JSONL can be supplied as an input, but a
-   *from-scratch regeneration* claim needs those scripts, their prompts,
-   model/API provenance and validation tests.
-5. **Make evaluation portable without bypassing its safeguards.** JSONL
-   contains absolute `/mnt/.../REFAVS` paths. Relocation changes the JSONL
-   SHA256; some native historical evaluators also require a particular
-   old-workspace path and a matching previously saved evaluation manifest.
-   Regenerate a trusted local split manifest and adjust these checks to
-   compare both original source provenance and relocated source. Do not
-   remove split/hash/FPS/projector/decoder verification to make evaluation
-   pass on another host.
+   steps). Reviewed JSONL manifests can be relocated with
+   `scripts/data/relocate_media_paths.py`, while *from-scratch regeneration*
+   still requires supplying those missing scripts, their prompts, model/API
+   provenance, and validation tests separately.
+5. **Portability without bypassing safeguards (code fixes applied).**
+   - Launchers auto-detect `.venv` / `VIRTUAL_ENV`, support `.env`
+     (`OMNIOPD_LOAD_ENV=1`), export `PYTHONPATH`, and accept overrides for
+     `SFT_CHECKPOINT`, `DATA_ROOT`, `DATASET_AUDIT`, `EXPECTED_STEPS`, `MODEL`,
+     `SAM2_CHECKPOINT`, `TRAIN_JSONL`, and `VAL_JSONL`.
+   - `scripts/eval/omni_eval_settings.py` provides a CLI (`--data-dir`,
+     `--splits`, `--output`) to generate a local `audit.json` from relocated
+     splits, and standalone entrypoints auto-insert repo/SAM2 import paths.
+   - `scripts/eval/test_qwen2_5_omni_refavs.py` and native evaluators keep
+     strict split, hash, FPS, projector, trained-sidecar, and mask-saving
+     verification intact while supporting relocated paths via CLI/env overrides.
 
 ### Rights/provenance items to resolve
 
@@ -117,6 +123,12 @@ python scripts/data/relocate_media_paths.py \
   --output /restricted/relocated/refavs_test_s.jsonl \
   --old-root /original/REFAVS \
   --new-root "$REFAVS_ROOT"
+
+# After relocating splits, generate a local dataset timing audit JSON:
+python scripts/eval/omni_eval_settings.py \
+  --data-dir /restricted/relocated \
+  --splits test_s test_u \
+  --output outputs/artifacts/audit.json
 ```
 
 The tool checks every referenced file by default, retains row labels and
@@ -152,7 +164,8 @@ For each experiment, attach:
   `ff5128777dd3dc5538f1a95fbcc29442c327d7d2` plus
   `scripts/setup/ms-swift-v4.5.2-teacher-adapters.patch`, SAM2 revision,
   Python/CUDA/torch/transformers versions, launcher and env vars (redacted).
-  `scripts/setup/bootstrap_ms_swift.sh` reconstructs the patched checkout.
+  `scripts/setup/bootstrap_ms_swift.sh` (`--install-deps` or `--no-deps`)
+  reconstructs the patched checkout.
   SFT/GRPO/OPD and native MOPD overlays used **different installed NumPy
   versions**: consult their separate observed-version files under
   `scripts/setup/`; produce a clean-machine full lockfile before claiming
@@ -190,8 +203,8 @@ library to check required source, Python/Bash syntax, local links, tracked
 large-media/credential files and a synthetic media-path relocation fixture:
 
 ```bash
-python -S scripts/setup/repo_doctor.py --strict
-python -S -m unittest discover -s tests -p test_repository_contract.py -v
+python3 -S scripts/setup/repo_doctor.py --strict
+python3 -S -m unittest discover -s tests -p test_repository_contract.py -v
 ```
 
 It intentionally does **not** download any model, run GPU training, audit

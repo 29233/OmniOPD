@@ -7,9 +7,41 @@ set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
-SWIFT_ENV="${SWIFT_ENV:-${CONDA_PREFIX:-/usr/local}}"
-SWIFT_BIN="${SWIFT_BIN:-${SWIFT_ENV}/bin/swift}"
-PYTHON_BIN="${PYTHON_BIN:-${SWIFT_ENV}/bin/python}"
+export PYTHONUTF8=1 LANG=C.UTF-8 LC_ALL=C.UTF-8
+if [[ "${OMNIOPD_LOAD_ENV:-0}" == "1" && -f "${ROOT_DIR}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${ROOT_DIR}/.env"
+  set +a
+fi
+if [[ -z "${SWIFT_ENV:-}" ]]; then
+  if [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/python" ]]; then
+    SWIFT_ENV="${VIRTUAL_ENV}"
+  elif [[ -n "${CONDA_PREFIX:-}" && "${CONDA_DEFAULT_ENV:-base}" != "base" && -x "${CONDA_PREFIX}/bin/python" ]]; then
+    SWIFT_ENV="${CONDA_PREFIX}"
+  elif [[ -x "${ROOT_DIR}/.venv/bin/python" ]]; then
+    SWIFT_ENV="${ROOT_DIR}/.venv"
+  fi
+fi
+if [[ -z "${PYTHON_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/python" ]]; then
+    PYTHON_BIN="${SWIFT_ENV}/bin/python"
+  else
+    PYTHON_BIN="$(command -v python3 || command -v python || true)"
+  fi
+elif [[ "${PYTHON_BIN}" != */* ]]; then
+  PYTHON_BIN="$(command -v "${PYTHON_BIN}" || true)"
+fi
+if [[ -z "${SWIFT_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/swift" ]]; then
+    SWIFT_BIN="${SWIFT_ENV}/bin/swift"
+  else
+    SWIFT_BIN="$(command -v swift || true)"
+  fi
+elif [[ "${SWIFT_BIN}" != */* ]]; then
+  SWIFT_BIN="$(command -v "${SWIFT_BIN}" || true)"
+fi
+export SWIFT_ENV PYTHON_BIN SWIFT_BIN
 MODEL="${MODEL:-models/Qwen2___5-Omni-7B}"
 SFT_CHECKPOINT="${SFT_CHECKPOINT:-${ROOT_DIR}/outputs/train/sam2_merged_sft_3epoch_8gpu_20261102_merged_v4_full/checkpoint-4809}"
 GRPO_CHECKPOINT="${GRPO_CHECKPOINT:-${ROOT_DIR}/outputs/train/merged_grpo_online_20261103_v1/checkpoint-1000}"
@@ -19,7 +51,7 @@ OUTPUT_DIR="${OUTPUT_DIR:?Set OUTPUT_DIR}"
 SAM2_CHECKPOINT="${SAM2_CHECKPOINT:-models/sam2_hiera_large.pt}"
 SAM2_CONFIG="${SAM2_CONFIG:-configs/sam2/sam2_hiera_l.yaml}"
 
-export PYTHONPATH="${ROOT_DIR}/third_party/sam2_runtime_deps:${ROOT_DIR}/third_party/sam2:${ROOT_DIR}:${PYTHONPATH:-}"
+export PYTHONPATH="${ROOT_DIR}/third_party/sam2:${ROOT_DIR}:${PYTHONPATH:-}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 IFS=',' read -r -a GPU_DEVICES <<< "$CUDA_VISIBLE_DEVICES"
 [[ "${#GPU_DEVICES[@]}" == 8 ]] || { echo "Three-teacher Joint requires 8 GPUs" >&2; exit 2; }
@@ -33,13 +65,15 @@ for required in \
   "$GRPO_CHECKPOINT/aurora_projector_config.json" \
   "$GRPO_CHECKPOINT/sam2_video_decoder.safetensors" \
   "$TRAIN_JSONL" "$DATA_ROOT/manifest.json" "$SAM2_CHECKPOINT"; do
-  [[ -e "$required" ]] || { echo "Missing three-teacher requirement: $required" >&2; exit 1; }
+  [[ -n "$required" && -e "$required" ]] || { echo "Missing three-teacher requirement: ${required:-<empty>}" >&2; exit 1; }
 done
 
 export AURORA_SEG_BACKEND=sam2
 export AURORA_SAM2_CHECKPOINT="$SAM2_CHECKPOINT"
 export AURORA_SAM2_CONFIG="$SAM2_CONFIG"
-export DATASET_VIDEO_FPS=1.0 FPS=1.0 AURORA_VIDEO_FPS=1.0
+export DATASET_VIDEO_FPS="${DATASET_VIDEO_FPS:-1.0}"
+export FPS="${FPS:-1.0}"
+export AURORA_VIDEO_FPS="${AURORA_VIDEO_FPS:-${FPS}}"
 export FPS_MAX_FRAMES=768 VIDEO_MAX_TOKEN_NUM=768 IMAGE_MAX_TOKEN_NUM=16384
 export AURORA_NUM_SAM_FRAMES=10 AURORA_PROJECTOR_HIDDEN_SIZE=1024 AURORA_PROJECTOR_LAYER_NORM=0
 export ENABLE_AUDIO_OUTPUT=0 USE_AUDIO_IN_VIDEO=0 TOKENIZERS_PARALLELISM=false

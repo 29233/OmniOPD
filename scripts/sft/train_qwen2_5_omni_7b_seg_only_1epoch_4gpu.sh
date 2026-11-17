@@ -5,17 +5,62 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SWIFT_ENV="${SWIFT_ENV:-${CONDA_PREFIX:-/usr/local}}"
-export SWIFT_BIN="${SWIFT_BIN:-${SWIFT_ENV}/bin/swift}"
-export PYTHON_BIN="${PYTHON_BIN:-${SWIFT_ENV}/bin/python}"
-export TORCHRUN_BIN="${TORCHRUN_BIN:-${SWIFT_ENV}/bin/torchrun}"
+cd "${ROOT_DIR}"
+export PYTHONUTF8=1 LANG=C.UTF-8 LC_ALL=C.UTF-8
+if [[ "${OMNIOPD_LOAD_ENV:-0}" == "1" && -f "${ROOT_DIR}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${ROOT_DIR}/.env"
+  set +a
+fi
+if [[ -z "${SWIFT_ENV:-}" ]]; then
+  if [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/python" ]]; then
+    SWIFT_ENV="${VIRTUAL_ENV}"
+  elif [[ -n "${CONDA_PREFIX:-}" && "${CONDA_DEFAULT_ENV:-base}" != "base" && -x "${CONDA_PREFIX}/bin/python" ]]; then
+    SWIFT_ENV="${CONDA_PREFIX}"
+  elif [[ -x "${ROOT_DIR}/.venv/bin/python" ]]; then
+    SWIFT_ENV="${ROOT_DIR}/.venv"
+  fi
+fi
+if [[ -z "${PYTHON_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/python" ]]; then
+    PYTHON_BIN="${SWIFT_ENV}/bin/python"
+  else
+    PYTHON_BIN="$(command -v python3 || command -v python || true)"
+  fi
+elif [[ "${PYTHON_BIN}" != */* ]]; then
+  PYTHON_BIN="$(command -v "${PYTHON_BIN}" || true)"
+fi
+if [[ -z "${SWIFT_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/swift" ]]; then
+    SWIFT_BIN="${SWIFT_ENV}/bin/swift"
+  else
+    SWIFT_BIN="$(command -v swift || true)"
+  fi
+elif [[ "${SWIFT_BIN}" != */* ]]; then
+  SWIFT_BIN="$(command -v "${SWIFT_BIN}" || true)"
+fi
+if [[ -z "${TORCHRUN_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/torchrun" ]]; then
+    TORCHRUN_BIN="${SWIFT_ENV}/bin/torchrun"
+  else
+    TORCHRUN_BIN="$(command -v torchrun || true)"
+  fi
+elif [[ "${TORCHRUN_BIN}" != */* ]]; then
+  TORCHRUN_BIN="$(command -v "${TORCHRUN_BIN}" || true)"
+fi
+export SWIFT_ENV SWIFT_BIN PYTHON_BIN TORCHRUN_BIN
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 export NPROC_PER_NODE=4
-export MODEL_PATH="${MODEL_PATH:-models/Qwen2___5-Omni-7B}"
+export MODEL_PATH="${MODEL_PATH:-${MODEL:-models/Qwen2___5-Omni-7B}}"
 export INIT_CHECKPOINT="${INIT_CHECKPOINT:-${ROOT_DIR}/outputs/train/qwen2_5_omni_7b_sft_4gpu/v0-20260828-021854/checkpoint-5265}"
-export TRAIN_JSONL="${TRAIN_JSONL:-${ROOT_DIR}/outputs/data/refavs/refavs_full.jsonl}"
 export DATA_DIR="${DATA_DIR:-${ROOT_DIR}/outputs/data/refavs}"
+_DEFAULT_TRAIN_JSONL="${DATA_DIR}/refavs_train.jsonl"
+if [[ ! -f "${_DEFAULT_TRAIN_JSONL}" && -f "${DATA_DIR}/refavs_full.jsonl" ]]; then
+  _DEFAULT_TRAIN_JSONL="${DATA_DIR}/refavs_full.jsonl"
+fi
+export TRAIN_JSONL="${TRAIN_JSONL:-${_DEFAULT_TRAIN_JSONL}}"
 export OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/outputs/train/qwen2_5_omni_7b_seg_only_1epoch_4gpu}"
 export EVAL_OUTPUT_ROOT="${EVAL_OUTPUT_ROOT:-${ROOT_DIR}/outputs/eval/qwen2_5_omni_7b/seg_only_1epoch_4gpu}"
 
@@ -30,7 +75,7 @@ export AURORA_NUM_SAM_FRAMES="${AURORA_NUM_SAM_FRAMES:-10}"
 export AURORA_SAM_CHECKPOINT="${AURORA_SAM_CHECKPOINT:-models/sam_vit_h_4b8939.pth}"
 export ENABLE_AUDIO_OUTPUT=0
 export MAX_PIXELS="${MAX_PIXELS:-200704}"
-export PYTHONPATH="${ROOT_DIR}:${PYTHONPATH:-}"
+export PYTHONPATH="${ROOT_DIR}/third_party/sam2:${ROOT_DIR}:${PYTHONPATH:-}"
 
 export LEARNING_RATE="${LEARNING_RATE:-1e-5}"
 export GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-2}"

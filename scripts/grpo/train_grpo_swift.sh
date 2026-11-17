@@ -14,7 +14,43 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "${ROOT_DIR}"
+export PYTHONUTF8=1 LANG=C.UTF-8 LC_ALL=C.UTF-8
+if [[ "${OMNIOPD_LOAD_ENV:-0}" == "1" && -f "${ROOT_DIR}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${ROOT_DIR}/.env"
+  set +a
+fi
 SOURCE_DIR="${AURORA_SOURCE_DIR:-.}"
+if [[ -z "${SWIFT_ENV:-}" ]]; then
+  if [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/python" ]]; then
+    SWIFT_ENV="${VIRTUAL_ENV}"
+  elif [[ -n "${CONDA_PREFIX:-}" && "${CONDA_DEFAULT_ENV:-base}" != "base" && -x "${CONDA_PREFIX}/bin/python" ]]; then
+    SWIFT_ENV="${CONDA_PREFIX}"
+  elif [[ -x "${ROOT_DIR}/.venv/bin/python" ]]; then
+    SWIFT_ENV="${ROOT_DIR}/.venv"
+  fi
+fi
+if [[ -z "${PYTHON_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/python" ]]; then
+    PYTHON_BIN="${SWIFT_ENV}/bin/python"
+  else
+    PYTHON_BIN="$(command -v python3 || command -v python || true)"
+  fi
+elif [[ "${PYTHON_BIN}" != */* ]]; then
+  PYTHON_BIN="$(command -v "${PYTHON_BIN}" || true)"
+fi
+if [[ -z "${SWIFT_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/swift" ]]; then
+    SWIFT_BIN="${SWIFT_ENV}/bin/swift"
+  else
+    SWIFT_BIN="$(command -v swift || true)"
+  fi
+elif [[ "${SWIFT_BIN}" != */* ]]; then
+  SWIFT_BIN="$(command -v "${SWIFT_BIN}" || true)"
+fi
+export SWIFT_ENV PYTHON_BIN SWIFT_BIN
 
 export BASE_MODEL="${BASE_MODEL:-${SOURCE_DIR}/models/Qwen2___5-Omni-3B}"
 # GRPO starts from the Stage-1 SFT checkpoint (LoRA + SAM sidecar).
@@ -34,7 +70,8 @@ export AURORA_SAM_CHECKPOINT="${AURORA_SAM_CHECKPOINT:-models/sam_vit_h_4b8939.p
 export AURORA_NUM_SAM_FRAMES="${AURORA_NUM_SAM_FRAMES:-10}"
 # Audited REF-AVS clips have ten stored frames across ten seconds, nominal
 # 1 FPS (per-frame sampling timestamps unavailable).
-export FPS="${FPS:-1.0}" AURORA_VIDEO_FPS="${AURORA_VIDEO_FPS:-${FPS}}"
+export FPS="${FPS:-1.0}"
+export AURORA_VIDEO_FPS="${AURORA_VIDEO_FPS:-${FPS}}"
 export FPS_MAX_FRAMES="${FPS_MAX_FRAMES:-768}"
 export VIDEO_MAX_TOKEN_NUM="${VIDEO_MAX_TOKEN_NUM:-768}"
 export IMAGE_MAX_TOKEN_NUM="${IMAGE_MAX_TOKEN_NUM:-16384}"
@@ -48,7 +85,10 @@ export IMAGE_MAX_TOKEN_NUM="${IMAGE_MAX_TOKEN_NUM:-16384}"
 export AURORA_SAM_IOU_URLS="${AURORA_SAM_IOU_URLS:-http://localhost:8877}"
 export AURORA_GRPO_MASK_LOSS="${AURORA_GRPO_MASK_LOSS:-0}"
 export AURORA_GRPO_REWARD_FAIL_OPEN="${AURORA_GRPO_REWARD_FAIL_OPEN:-0}"
-PYTHON_BIN="${PYTHON_BIN:-python}"
+for required in "${PYTHON_BIN}" "${SWIFT_BIN}" "${BASE_MODEL}" "${STAGE1_ADAPTERS}" "${TRAIN_JSONL}" "${VAL_JSONL}" "${AURORA_SAM_CHECKPOINT}"; do
+  [[ -n "${required}" && -e "${required}" ]] || { echo "Missing GRPO requirement: ${required:-<empty>}" >&2; exit 1; }
+done
+if [[ "${DRY_RUN:-0}" != "1" ]]; then
 "${PYTHON_BIN}" - <<'PY'
 import json, os, urllib.request
 urls = [s.strip().rstrip("/") for s in os.environ["AURORA_SAM_IOU_URLS"].split(",") if s.strip()]
@@ -64,11 +104,12 @@ for url in urls:
 else:
     raise SystemExit("No healthy SAM IoU reward service; refusing GRPO: " + "; ".join(errors))
 PY
+fi
 export ENABLE_AUDIO_OUTPUT=0
 export MAX_PIXELS="${MAX_PIXELS:-200704}"
 export REPORT_TO="${REPORT_TO:-tensorboard}"
 # repo root on sys.path so external_plugins can `import swift_plugin.*`
-export PYTHONPATH="${ROOT_DIR}:${PYTHONPATH:-}"
+export PYTHONPATH="${ROOT_DIR}/third_party/sam2:${ROOT_DIR}:${PYTHONPATH:-}"
 
 # Schedule
 export MAX_STEPS="${MAX_STEPS:--1}"
@@ -98,24 +139,25 @@ export VAL_MAX_SAMPLES="${VAL_MAX_SAMPLES:-8}"
 export ADD_VERSION="${ADD_VERSION:-true}"
 export RESUME_FROM_CHECKPOINT="${RESUME_FROM_CHECKPOINT:-}"
 
+mkdir -p "${OUTPUT_DIR}"
+
 # --- optional smoke-mode truncation --------------------------------------
 if [[ "${MAX_SAMPLES:-}" != "-1" && -n "${MAX_SAMPLES:-}" ]]; then
-  python - "${TRAIN_JSONL}" "${MAX_SAMPLES}" << 'EOF'
-import json, sys
-src, cap = sys.argv[1], int(sys.argv[2])
+  SMOKE_TRAIN_JSONL="${OUTPUT_DIR}/train_smoke_${MAX_SAMPLES}.jsonl"
+  "${PYTHON_BIN}" - "${TRAIN_JSONL}" "${SMOKE_TRAIN_JSONL}" "${MAX_SAMPLES}" << 'EOF'
+import sys
+src, dst, cap = sys.argv[1], sys.argv[2], int(sys.argv[3])
 rows = []
-with open(src) as f:
+with open(src, encoding="utf-8") as f:
     for line in f:
         if len(rows) >= cap: break
         rows.append(line)
-with open(src + '.smoke.jsonl', 'w') as f:
+with open(dst, "w", encoding="utf-8") as f:
     f.writelines(rows)
-print(f"smoke train set: {len(rows)} rows -> {src}.smoke.jsonl")
+print(f"smoke train set: {len(rows)} rows -> {dst}")
 EOF
-  export TRAIN_JSONL="${TRAIN_JSONL}.smoke.jsonl"
+  export TRAIN_JSONL="${SMOKE_TRAIN_JSONL}"
 fi
-
-mkdir -p "${OUTPUT_DIR}"
 
 RESUME_ARGS=()
 if [[ -n "${RESUME_FROM_CHECKPOINT}" ]]; then
@@ -127,10 +169,10 @@ if [[ -n "${RESUME_FROM_CHECKPOINT}" ]]; then
   echo "Resuming GRPO from: ${RESUME_FROM_CHECKPOINT}"
 fi
 
-# Absolute path: a bare `swift` resolves to a hacked source checkout in the
-# base env (cate-pred-embedding/swift, missing dw_config) - always use the
-# swift46 env's CLI.
-SWIFT_BIN="${SWIFT_BIN:-swift}"
+if [[ "${DRY_RUN:-0}" == "1" ]]; then
+  echo "DRY_RUN=1: GRPO preflight passed (model=${BASE_MODEL}, train=${TRAIN_JSONL})"
+  exit 0
+fi
 
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
 NPROC_PER_NODE="${NPROC_PER_NODE}" \

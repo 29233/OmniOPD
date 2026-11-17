@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # AURORA OPSD training entry point (ms-swift 4.x GKD with teacher_prompt).
 #
-# Runs in the `swift46` conda env (ms-swift 4.5.2). Requires:
+# Requires an isolated Python 3.10 environment with ms-swift v4.5.2 + patch
+# (see scripts/setup/bootstrap_ms_swift.sh):
 #   - dataset with a teacher_prompt column (scripts/data/prepare_refavs_opsd.py)
 #   - swift_plugin/aurora_opsd.py (GKD trainer + AURORA mask supervision)
 #
@@ -16,12 +17,19 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "${ROOT_DIR}"
 # TRL reads its UTF-8 model-card template through locale-dependent
 # Path.read_text() whenever a checkpoint is saved. Keep direct invocations
 # safe even when the platform launches workers with an ASCII locale.
 export PYTHONUTF8=1
 export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
+if [[ "${OMNIOPD_LOAD_ENV:-0}" == "1" && -f "${ROOT_DIR}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${ROOT_DIR}/.env"
+  set +a
+fi
 SOURCE_DIR="${AURORA_SOURCE_DIR:-.}"
 
 # Base model: the SFT Stage-1 checkpoint directory (LoRA adapter + SAM sidecar).
@@ -144,7 +152,8 @@ export AURORA_SAM_CHECKPOINT="${AURORA_SAM_CHECKPOINT:-models/sam_vit_h_4b8939.p
 export AURORA_NUM_SAM_FRAMES="${AURORA_NUM_SAM_FRAMES:-10}"
 # REF-AVS audit: ten stored frames per approximately ten-second clip
 # (nominal 1 FPS; exact timestamps were not recorded).
-export FPS="${FPS:-1.0}" AURORA_VIDEO_FPS="${AURORA_VIDEO_FPS:-${FPS}}"
+export FPS="${FPS:-1.0}"
+export AURORA_VIDEO_FPS="${AURORA_VIDEO_FPS:-${FPS}}"
 export FPS_MAX_FRAMES="${FPS_MAX_FRAMES:-768}"
 export VIDEO_MAX_TOKEN_NUM="${VIDEO_MAX_TOKEN_NUM:-768}"
 export IMAGE_MAX_TOKEN_NUM="${IMAGE_MAX_TOKEN_NUM:-16384}"
@@ -154,52 +163,89 @@ export MAX_LENGTH="${MAX_LENGTH:-4096}"
 export REPORT_TO="${REPORT_TO:-tensorboard}"
 export LOG_COMPLETIONS="${LOG_COMPLETIONS:-false}"
 export RESUME_FROM_CHECKPOINT="${RESUME_FROM_CHECKPOINT:-}"
-export SWIFT_BIN="${SWIFT_BIN:-swift}"
-export PYTHON_BIN="${PYTHON_BIN:-python}"
+if [[ -z "${SWIFT_ENV:-}" ]]; then
+  if [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/python" ]]; then
+    SWIFT_ENV="${VIRTUAL_ENV}"
+  elif [[ -n "${CONDA_PREFIX:-}" && "${CONDA_DEFAULT_ENV:-base}" != "base" && -x "${CONDA_PREFIX}/bin/python" ]]; then
+    SWIFT_ENV="${CONDA_PREFIX}"
+  elif [[ -x "${ROOT_DIR}/.venv/bin/python" ]]; then
+    SWIFT_ENV="${ROOT_DIR}/.venv"
+  fi
+fi
+if [[ -z "${PYTHON_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/python" ]]; then
+    PYTHON_BIN="${SWIFT_ENV}/bin/python"
+  else
+    PYTHON_BIN="$(command -v python3 || command -v python || true)"
+  fi
+elif [[ "${PYTHON_BIN}" != */* ]]; then
+  PYTHON_BIN="$(command -v "${PYTHON_BIN}" || true)"
+fi
+if [[ -z "${SWIFT_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/swift" ]]; then
+    SWIFT_BIN="${SWIFT_ENV}/bin/swift"
+  else
+    SWIFT_BIN="$(command -v swift || true)"
+  fi
+elif [[ "${SWIFT_BIN}" != */* ]]; then
+  SWIFT_BIN="$(command -v "${SWIFT_BIN}" || true)"
+fi
+export SWIFT_ENV SWIFT_BIN PYTHON_BIN
 
 # SAM2 uses the pinned upstream implementation and vendored pure-Python deps.
+export PYTHONPATH="${ROOT_DIR}/third_party/sam2:${ROOT_DIR}:${PYTHONPATH:-}"
 if [[ "${AURORA_SEG_BACKEND:-sam}" == "sam2" ]]; then
-  export PYTHONPATH="${ROOT_DIR}/third_party/sam2_runtime_deps:${ROOT_DIR}/third_party/sam2:${ROOT_DIR}:${PYTHONPATH:-}"
   MODULES_TO_SAVE=(embed_tokens lm_head text_hidden_fcs sam_mask_decoder memory_attention memory_encoder obj_ptr_proj mask_downsample)
+  _SEG_CKPT="${AURORA_SAM2_CHECKPOINT:-}"
 else
-  export PYTHONPATH="${ROOT_DIR}:${PYTHONPATH:-}"
   MODULES_TO_SAVE=(embed_tokens lm_head text_hidden_fcs mask_decoder)
+  _SEG_CKPT="${AURORA_SAM_CHECKPOINT}"
+fi
+
+for required in "${PYTHON_BIN}" "${SWIFT_BIN}" "${BASE_MODEL}" "${STAGE1_ADAPTERS}" "${TRAIN_JSONL}" "${VAL_JSONL}" "${_SEG_CKPT}"; do
+  [[ -n "${required}" && -e "${required}" ]] || { echo "Missing OPSD requirement: ${required:-<empty>}" >&2; exit 1; }
+done
+
+mkdir -p "${OUTPUT_DIR}"
+if [[ "${DRY_RUN:-0}" == "1" ]]; then
+  echo "DRY_RUN=1: OPSD preflight passed (mode=${AURORA_OPSD_TEACHER_MODE}, train=${TRAIN_JSONL}, val=${VAL_JSONL})"
+  exit 0
 fi
 
 # --- optional smoke-mode truncation --------------------------------------
 if [[ "${MAX_SAMPLES}" != "-1" ]]; then
-  "${PYTHON_BIN}" - "${TRAIN_JSONL}" "${MAX_SAMPLES}" << 'EOF'
-import json, sys
-src, cap = sys.argv[1], int(sys.argv[2])
+  SMOKE_TRAIN_JSONL="${OUTPUT_DIR}/train_smoke_${MAX_SAMPLES}.jsonl"
+  "${PYTHON_BIN}" - "${TRAIN_JSONL}" "${SMOKE_TRAIN_JSONL}" "${MAX_SAMPLES}" << 'EOF'
+import sys
+src, dst, cap = sys.argv[1], sys.argv[2], int(sys.argv[3])
 rows = []
-with open(src) as f:
+with open(src, encoding="utf-8") as f:
     for line in f:
         if len(rows) >= cap: break
         rows.append(line)
-with open(src + '.smoke.jsonl', 'w') as f:
+with open(dst, "w", encoding="utf-8") as f:
     f.writelines(rows)
-print(f"smoke train set: {len(rows)} rows -> {src}.smoke.jsonl")
+print(f"smoke train set: {len(rows)} rows -> {dst}")
 EOF
-  export TRAIN_JSONL="${TRAIN_JSONL}.smoke.jsonl"
+  export TRAIN_JSONL="${SMOKE_TRAIN_JSONL}"
 fi
 
 if [[ "${VAL_MAX_SAMPLES}" != "-1" ]]; then
-  "${PYTHON_BIN}" - "${VAL_JSONL}" "${VAL_MAX_SAMPLES}" << 'EOF'
-import json, sys
-src, cap = sys.argv[1], int(sys.argv[2])
+  SMOKE_VAL_JSONL="${OUTPUT_DIR}/val_smoke_${VAL_MAX_SAMPLES}.jsonl"
+  "${PYTHON_BIN}" - "${VAL_JSONL}" "${SMOKE_VAL_JSONL}" "${VAL_MAX_SAMPLES}" << 'EOF'
+import sys
+src, dst, cap = sys.argv[1], sys.argv[2], int(sys.argv[3])
 rows = []
-with open(src) as f:
+with open(src, encoding="utf-8") as f:
     for line in f:
         if len(rows) >= cap: break
         rows.append(line)
-with open(src + '.smoke.jsonl', 'w') as f:
+with open(dst, "w", encoding="utf-8") as f:
     f.writelines(rows)
-print(f"smoke val set: {len(rows)} rows -> {src}.smoke.jsonl")
+print(f"smoke val set: {len(rows)} rows -> {dst}")
 EOF
-  export VAL_JSONL="${VAL_JSONL}.smoke.jsonl"
+  export VAL_JSONL="${SMOKE_VAL_JSONL}"
 fi
-
-mkdir -p "${OUTPUT_DIR}"
 
 RESUME_ARGS=()
 if [[ -n "${RESUME_FROM_CHECKPOINT}" ]]; then

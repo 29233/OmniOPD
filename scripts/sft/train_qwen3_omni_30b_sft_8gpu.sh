@@ -5,12 +5,48 @@ set -euo pipefail
 # The thinker LoRA, [SEG] embedding/output, text projector, and SAM mask
 # decoder are trained together.  The SAM image/prompt encoders stay frozen.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+export PYTHONUTF8=1 LANG=C.UTF-8 LC_ALL=C.UTF-8
+if [[ "${OMNIOPD_LOAD_ENV:-0}" == "1" && -f "${ROOT_DIR}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${ROOT_DIR}/.env"
+  set +a
+fi
 
 # Environment and hardware.
 export CONDA_ENV_NAME="${CONDA_ENV_NAME:-base}"
-export PYTHON_BIN="${PYTHON_BIN:-python}"
-export SWIFT_BIN="${SWIFT_BIN:-swift}"
-export PYTHONPATH="${ROOT_DIR}/third_party/ms-swift:${ROOT_DIR}:${PYTHONPATH:-}"
+if [[ -z "${SWIFT_ENV:-}" ]]; then
+  if [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/python" ]]; then
+    SWIFT_ENV="${VIRTUAL_ENV}"
+  elif [[ -n "${CONDA_PREFIX:-}" && "${CONDA_DEFAULT_ENV:-base}" != "base" && -x "${CONDA_PREFIX}/bin/python" ]]; then
+    SWIFT_ENV="${CONDA_PREFIX}"
+  elif [[ -x "${ROOT_DIR}/.venv/bin/python" ]]; then
+    SWIFT_ENV="${ROOT_DIR}/.venv"
+  fi
+fi
+if [[ -z "${PYTHON_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/python" ]]; then
+    PYTHON_BIN="${SWIFT_ENV}/bin/python"
+  else
+    PYTHON_BIN="$(command -v python3 || command -v python || true)"
+  fi
+elif [[ "${PYTHON_BIN}" != */* ]]; then
+  PYTHON_BIN="$(command -v "${PYTHON_BIN}" || true)"
+fi
+if [[ -z "${SWIFT_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/swift" ]]; then
+    SWIFT_BIN="${SWIFT_ENV}/bin/swift"
+  else
+    SWIFT_BIN="$(command -v swift || true)"
+  fi
+elif [[ "${SWIFT_BIN}" != */* ]]; then
+  SWIFT_BIN="$(command -v "${SWIFT_BIN}" || true)"
+fi
+export SWIFT_ENV PYTHON_BIN SWIFT_BIN
+export PYTHONPATH="${ROOT_DIR}/third_party/sam2:${ROOT_DIR}:${PYTHONPATH:-}"
+if [[ -n "${MS_SWIFT_ROOT:-}" ]]; then
+  export PYTHONPATH="${MS_SWIFT_ROOT}:${PYTHONPATH}"
+fi
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 export NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
@@ -31,7 +67,11 @@ export AURORA_SAM_CHECKPOINT="${AURORA_SAM_CHECKPOINT:-models/sam_vit_h_4b8939.p
 
 # Experiment paths.
 export MODEL_PATH="${MODEL_PATH:-${ROOT_DIR}/model/Qwen3-Omni-30B-A3B-Instruct}"
-export TRAIN_JSONL="${TRAIN_JSONL:-${ROOT_DIR}/outputs/data/refavs/refavs_full.jsonl}"
+_DEFAULT_Q3_TRAIN="${ROOT_DIR}/outputs/data/refavs/refavs_train.jsonl"
+if [[ ! -f "${_DEFAULT_Q3_TRAIN}" && -f "${ROOT_DIR}/outputs/data/refavs/refavs_full.jsonl" ]]; then
+  _DEFAULT_Q3_TRAIN="${ROOT_DIR}/outputs/data/refavs/refavs_full.jsonl"
+fi
+export TRAIN_JSONL="${TRAIN_JSONL:-${_DEFAULT_Q3_TRAIN}}"
 export VAL_JSONL="${VAL_JSONL:-${ROOT_DIR}/outputs/data/refavs/refavs_val.jsonl}"
 export OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/outputs/train/qwen3_omni_30b_joint_sft_8gpu}"
 

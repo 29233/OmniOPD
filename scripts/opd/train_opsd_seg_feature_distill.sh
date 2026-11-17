@@ -12,6 +12,14 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "${ROOT_DIR}"
+export PYTHONUTF8=1 LANG=C.UTF-8 LC_ALL=C.UTF-8
+if [[ "${OMNIOPD_LOAD_ENV:-0}" == "1" && -f "${ROOT_DIR}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${ROOT_DIR}/.env"
+  set +a
+fi
 SOURCE_DIR="${AURORA_SOURCE_DIR:-.}"
 
 # Experiment paths. Every value can be overridden before invoking this file.
@@ -57,15 +65,37 @@ for required_path in \
 done
 
 export AURORA_SAM_CHECKPOINT="${AURORA_SAM_CHECKPOINT:-models/sam_vit_h_4b8939.pth}"
-if [[ -z "${SWIFT_BIN:-}" ]]; then
-  if [[ -n "${CONDA_PREFIX:-}" && -x "${CONDA_PREFIX}/bin/swift" ]]; then
-    export SWIFT_BIN="${CONDA_PREFIX}/bin/swift"
-  else
-    export SWIFT_BIN="$(command -v swift || true)"
+if [[ -z "${SWIFT_ENV:-}" ]]; then
+  if [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/python" ]]; then
+    SWIFT_ENV="${VIRTUAL_ENV}"
+  elif [[ -n "${CONDA_PREFIX:-}" && "${CONDA_DEFAULT_ENV:-base}" != "base" && -x "${CONDA_PREFIX}/bin/python" ]]; then
+    SWIFT_ENV="${CONDA_PREFIX}"
+  elif [[ -x "${ROOT_DIR}/.venv/bin/python" ]]; then
+    SWIFT_ENV="${ROOT_DIR}/.venv"
   fi
 fi
-if [[ ! -x "${SWIFT_BIN}" ]]; then
-  echo "[error] swift executable is not executable: ${SWIFT_BIN}" >&2
+if [[ -z "${PYTHON_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/python" ]]; then
+    PYTHON_BIN="${SWIFT_ENV}/bin/python"
+  else
+    PYTHON_BIN="$(command -v python3 || command -v python || true)"
+  fi
+elif [[ "${PYTHON_BIN}" != */* ]]; then
+  PYTHON_BIN="$(command -v "${PYTHON_BIN}" || true)"
+fi
+if [[ -z "${SWIFT_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/swift" ]]; then
+    SWIFT_BIN="${SWIFT_ENV}/bin/swift"
+  else
+    SWIFT_BIN="$(command -v swift || true)"
+  fi
+elif [[ "${SWIFT_BIN}" != */* ]]; then
+  SWIFT_BIN="$(command -v "${SWIFT_BIN}" || true)"
+fi
+export SWIFT_ENV PYTHON_BIN SWIFT_BIN
+export PYTHONPATH="${ROOT_DIR}/third_party/sam2:${ROOT_DIR}:${PYTHONPATH:-}"
+if [[ -z "${SWIFT_BIN}" || ! -x "${SWIFT_BIN}" ]]; then
+  echo "[error] swift executable is not executable: ${SWIFT_BIN:-<empty>}" >&2
   exit 2
 fi
 
@@ -75,4 +105,4 @@ echo "[opsd] val:    ${VAL_JSONL}"
 echo "[opsd] teacher: ${TEACHER_MODEL} + ${TEACHER_ADAPTERS}"
 echo "[opsd] seg feature weight: ${AURORA_OPSD_SEG_DISTILL_WEIGHT}"
 
-exec bash "${ROOT_DIR}/scripts/opd/train_opsd_swift.sh"
+exec bash "${ROOT_DIR}/scripts/opd/train_opsd_swift.sh" "$@"

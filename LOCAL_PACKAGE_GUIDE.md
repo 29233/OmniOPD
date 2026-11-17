@@ -18,21 +18,26 @@ with the clean native `MOPD-Router-Omni` reasoning-only migration.
 Model weights/checkpoints, datasets and media, generated evaluation reports,
 TensorBoard/W&B logs, Python environments/caches, and credentials.
 The SAM and SAM2 Python sources are vendored here (weights are not). The
-ms-swift checkout is not bundled: use `scripts/setup/bootstrap_ms_swift.sh`
-to fetch v4.5.2 and apply the two teacher-adapter fixes in an isolated Python
-environment. Its extra SAM2 dependencies are listed in
-`scripts/setup/requirements_sam2_runtime.txt`. The clean MOPD migration
-contains its own `verl/` Python sources.
+ms-swift checkout is not bundled: create a Python 3.10 venv with CUDA-matched
+PyTorch (`torch==2.7.1`, `torchvision==0.22.1`, `torchaudio==2.7.1`) and run
+`bash scripts/setup/bootstrap_ms_swift.sh --install-deps` (or `--no-deps` when
+dependencies are pre-installed) to fetch v4.5.2, apply the two teacher-adapter
+fixes, and install observed Swift/framework/SAM2 dependencies. Its extra SAM2
+dependencies are listed in `scripts/setup/requirements_sam2_runtime.txt`. The
+clean MOPD migration contains its own `verl/` Python sources.
 
 ## Local use
 
 1. For the `ms-swift` / SAM / SAM2 path, start with `README.md`,
    `MS_SWIFT_SFT.md`, and `scripts/docs/INDEPENDENT_VERIFY.md`. The historical
-   `requirements_ms_swift.txt` is not the tested 2026-11-16 environment: it
-   pins Transformers 4.x instead of the tested 5.x stack. The *observed*
+   `requirements_ms_swift.txt` is legacy-only (archived Transformers 4.x pins)
+   and is NOT the tested 2026-11-17 Transformers 5.x environment. The *observed*
    Swift and native MOPD environments have separate files under
-   `scripts/setup/`, and neither is a complete transitive lockfile.
-   Set model/data/output paths via environment variables when invoking launchers.
+   `scripts/setup/` (`numpy==2.1.3` vs MOPD `numpy==1.26.4`), and neither is a
+   complete transitive lockfile.
+   Set model/data/output paths via `.env` (`OMNIOPD_LOAD_ENV=1` or
+   `set -a && source .env && set +a`) or inline environment variables when
+   invoking launchers. Launchers auto-detect `.venv` and `PYTHONPATH`.
 2. For native `MOPD-Router-Omni` reasoning-only training, follow
    `third_party/MOPD-Router-Omni/OMNI_MIGRATION.md`.
    That path requires a compatible CUDA/PyTorch/Transformers/Ray environment, local

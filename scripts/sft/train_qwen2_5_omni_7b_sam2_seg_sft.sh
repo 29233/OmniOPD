@@ -6,11 +6,50 @@ set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT_DIR}"
 export PYTHONUTF8=1 LANG=C.UTF-8 LC_ALL=C.UTF-8
-export PYTHONPATH="${ROOT_DIR}/third_party/sam2_runtime_deps:${ROOT_DIR}/third_party/sam2:${ROOT_DIR}:${PYTHONPATH:-}"
-SWIFT_ENV="${SWIFT_ENV:-${CONDA_PREFIX:-/usr/local}}"
-SWIFT_BIN="${SWIFT_BIN:-${SWIFT_ENV}/bin/swift}"
-PYTHON_BIN="${PYTHON_BIN:-${SWIFT_ENV}/bin/python}"
-TORCHRUN_BIN="${TORCHRUN_BIN:-${SWIFT_ENV}/bin/torchrun}"
+if [[ "${OMNIOPD_LOAD_ENV:-0}" == "1" && -f "${ROOT_DIR}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${ROOT_DIR}/.env"
+  set +a
+fi
+export PYTHONPATH="${ROOT_DIR}/third_party/sam2:${ROOT_DIR}:${PYTHONPATH:-}"
+if [[ -z "${SWIFT_ENV:-}" ]]; then
+  if [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/python" ]]; then
+    SWIFT_ENV="${VIRTUAL_ENV}"
+  elif [[ -n "${CONDA_PREFIX:-}" && "${CONDA_DEFAULT_ENV:-base}" != "base" && -x "${CONDA_PREFIX}/bin/python" ]]; then
+    SWIFT_ENV="${CONDA_PREFIX}"
+  elif [[ -x "${ROOT_DIR}/.venv/bin/python" ]]; then
+    SWIFT_ENV="${ROOT_DIR}/.venv"
+  fi
+fi
+if [[ -z "${PYTHON_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/python" ]]; then
+    PYTHON_BIN="${SWIFT_ENV}/bin/python"
+  else
+    PYTHON_BIN="$(command -v python3 || command -v python || true)"
+  fi
+elif [[ "${PYTHON_BIN}" != */* ]]; then
+  PYTHON_BIN="$(command -v "${PYTHON_BIN}" || true)"
+fi
+if [[ -z "${SWIFT_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/swift" ]]; then
+    SWIFT_BIN="${SWIFT_ENV}/bin/swift"
+  else
+    SWIFT_BIN="$(command -v swift || true)"
+  fi
+elif [[ "${SWIFT_BIN}" != */* ]]; then
+  SWIFT_BIN="$(command -v "${SWIFT_BIN}" || true)"
+fi
+if [[ -z "${TORCHRUN_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/torchrun" ]]; then
+    TORCHRUN_BIN="${SWIFT_ENV}/bin/torchrun"
+  else
+    TORCHRUN_BIN="$(command -v torchrun || true)"
+  fi
+elif [[ "${TORCHRUN_BIN}" != */* ]]; then
+  TORCHRUN_BIN="$(command -v "${TORCHRUN_BIN}" || true)"
+fi
+export SWIFT_ENV PYTHON_BIN SWIFT_BIN TORCHRUN_BIN
 
 RUN_ID="${RUN_ID:-20261030_v2_3epoch}"
 MODEL="${MODEL:-models/Qwen2___5-Omni-7B}"
@@ -25,7 +64,7 @@ SAM2_CHECKPOINT="${SAM2_CHECKPOINT:-models/sam2_hiera_large.pt}"
 SAM2_CONFIG="${SAM2_CONFIG:-configs/sam2/sam2_hiera_l.yaml}"
 EPOCHS="${EPOCHS:-3}"
 LEARNING_RATE="${LEARNING_RATE:-1e-5}"
-EXPECTED_STEPS=""
+EXPECTED_STEPS="${EXPECTED_STEPS:-}"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 IFS=',' read -r -a GPU_DEVICES <<< "${CUDA_VISIBLE_DEVICES}"
@@ -40,7 +79,9 @@ else
 fi
 
 export AURORA_SEG_BACKEND=sam2 AURORA_SAM2_CHECKPOINT="${SAM2_CHECKPOINT}" AURORA_SAM2_CONFIG="${SAM2_CONFIG}"
-export FPS=1.0 AURORA_VIDEO_FPS=1.0 FPS_MAX_FRAMES=768 VIDEO_MAX_TOKEN_NUM=768 IMAGE_MAX_TOKEN_NUM=16384
+export FPS="${FPS:-1.0}"
+export AURORA_VIDEO_FPS="${AURORA_VIDEO_FPS:-${FPS}}"
+export FPS_MAX_FRAMES="${FPS_MAX_FRAMES:-768}" VIDEO_MAX_TOKEN_NUM="${VIDEO_MAX_TOKEN_NUM:-768}" IMAGE_MAX_TOKEN_NUM="${IMAGE_MAX_TOKEN_NUM:-16384}"
 export AURORA_NUM_SAM_FRAMES=10 AURORA_PROJECTOR_HIDDEN_SIZE=1024 AURORA_PROJECTOR_LAYER_NORM=0
 unset AURORA_SEGMENTATION_ONLY
 export AURORA_CE_WEIGHT=1.0 AURORA_BCE_WEIGHT=2.0 AURORA_DICE_WEIGHT=0.5

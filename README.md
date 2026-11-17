@@ -104,26 +104,43 @@ A standalone migration of `MOPD-Router` on `verl` for full-decoder Qwen2.5-Omni 
 ## Installation & Environment
 
 1. **For `ms-swift` (SFT / GRPO / OPSD / Verified Routed OPD)**:
-   Use an isolated Python 3.10 CUDA environment with a compatible
-   PyTorch/Transformers stack. The historical `requirements_ms_swift.txt`
-   pins Transformers **4.x** and does not reproduce the checked **5.x**
-   environment; see
-   [ms-swift observed versions](scripts/setup/requirements_swift_observed_20261117.txt)
-   for the tested SFT/GRPO/OPD path (not a full transitive lockfile).
-   The [native MOPD overlay](scripts/setup/requirements_mopd_overlay_observed_20261116.txt)
-   is a **different environment**. Install
-   [SAM2 runtime dependencies](scripts/setup/requirements_sam2_runtime.txt)
-   and the pinned ms-swift v4.5.2 source plus the local teacher-adapter patch:
+   Create an isolated Python 3.10 environment and install CUDA-matched
+   PyTorch wheels (`torch==2.7.1`, `torchvision==0.22.1`, `torchaudio==2.7.1`)
+   for your target GPU platform first:
    ```bash
-   PYTHON_BIN=/path/to/isolated-env/bin/python bash scripts/setup/bootstrap_ms_swift.sh
-   export PYTHONPATH="$PWD/third_party/sam2:$PWD"
+   python3 -m venv .venv
+   source .venv/bin/activate
+   # Install CUDA-matched torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 first, then:
+   bash scripts/setup/bootstrap_ms_swift.sh --install-deps
    ```
-   SAM/SAM2 Python source is in the repository once the local additions are
-   committed; SAM2 Hiera-L and SAM ViT-H base **weights** must be supplied
-   separately with appropriate access/terms.
+   `bootstrap_ms_swift.sh --install-deps` clones `ms-swift` `v4.5.2`, applies the
+   frozen teacher-adapter patch, installs
+   [ms-swift observed versions](scripts/setup/requirements_swift_observed_20261117.txt),
+   `third_party/ms-swift/requirements/framework.txt` (constrained by those pins),
+   and [SAM2 runtime dependencies](scripts/setup/requirements_sam2_runtime.txt),
+   and installs `third_party/ms-swift` in editable mode. Use `--no-deps` if
+   those packages are already provisioned. The historical
+   `requirements_ms_swift.txt` is legacy-only (archived Transformers 4.x pins)
+   and must not be used for the current 5.x runtime.
 
-2. **For `third_party/MOPD-Router-Omni`**:
-   See [third_party/MOPD-Router-Omni/OMNI_MIGRATION.md](third_party/MOPD-Router-Omni/OMNI_MIGRATION.md) and run:
+   Verify checkout contracts (dependency-free):
+   ```bash
+   python3 -S scripts/setup/repo_doctor.py --strict
+   python3 -S -m unittest discover -s tests -p test_repository_contract.py -v
+   ```
+   Copy `.env.example` to `.env` and fill in local paths, then either run
+   `set -a && source .env && set +a` or pass `OMNIOPD_LOAD_ENV=1` to launchers.
+   Launchers auto-detect `.venv` (`VIRTUAL_ENV` / `.venv` / `PYTHON_BIN` /
+   `SWIFT_BIN`) and export `PYTHONPATH="$PWD/third_party/sam2:$PWD"`.
+   SAM/SAM2 Python source is vendored here; SAM2 Hiera-L and SAM ViT-H base
+   **weights** must be supplied separately with appropriate access/terms.
+
+2. **For `third_party/MOPD-Router-Omni` (separate environment)**:
+   Native MOPD uses a **separate** venv overlay with `numpy==1.26.4` and
+   `opencv-python-headless==4.11.0.86` (kept strictly isolated from ms-swift's
+   `numpy==2.1.3`). See
+   [third_party/MOPD-Router-Omni/OMNI_MIGRATION.md](third_party/MOPD-Router-Omni/OMNI_MIGRATION.md)
+   and run:
    ```bash
    cd third_party/MOPD-Router-Omni
    bash bootstrap_omni_env.sh
@@ -138,9 +155,35 @@ not turnkey downloads. All scripts are organized by functional stage under
 `scripts/` (see [scripts/README.md](scripts/README.md) for current versus
 historical-only recipes).
 
-### 1. Data & Privilege Preparation (`scripts/data/`)
+### 1. Data Relocation, Timing Audit & Preparation (`scripts/data/`, `scripts/eval/`)
 ```bash
-# Example conversion from authorized media/metadata and reviewed CoT input.
+# Relocate reviewed CoT / evaluation JSONLs to your local REFAVS media root.
+# Original JSONLs are never modified; each output records a .media_manifest.json.
+python scripts/data/relocate_media_paths.py \
+  --source /restricted/manifests/structured_cot.jsonl \
+  --output outputs/data/sft_relocated/structured_cot.jsonl \
+  --old-root /original/REFAVS \
+  --new-root /data/REFAVS
+
+python scripts/data/relocate_media_paths.py \
+  --source /restricted/manifests/refavs_test_s.jsonl \
+  --output outputs/data/eval_relocated/refavs_test_s.jsonl \
+  --old-root /original/REFAVS \
+  --new-root /data/REFAVS
+
+python scripts/data/relocate_media_paths.py \
+  --source /restricted/manifests/refavs_test_u.jsonl \
+  --output outputs/data/eval_relocated/refavs_test_u.jsonl \
+  --old-root /original/REFAVS \
+  --new-root /data/REFAVS
+
+# Generate a local dataset timing audit JSON from your relocated splits.
+python scripts/eval/omni_eval_settings.py \
+  --data-dir outputs/data/eval_relocated \
+  --splits test_s test_u \
+  --output outputs/artifacts/audit.json
+
+# Legacy Stage-1 raw REF-AVS conversion (for Stage-1 3B/Qwen3/VideoLLaMA2 SFT).
 # Supplying the train reasoning JSON is mandatory even when split=test_s.
 python scripts/data/prepare_refavs_swift_sft.py \
   --dataset-dir /data/REFAVS \
@@ -158,25 +201,38 @@ attempting a from-scratch data regeneration.
 ### 2. Supervised Fine-Tuning (`scripts/sft/`)
 ```bash
 # Qwen2.5-Omni-7B + SAM2 3-epoch joint SFT (8 GPUs)
-MODEL=models/Qwen2___5-Omni-7B \
-SAM2_CHECKPOINT=models/sam2_hiera_large.pt \
+MODEL=/path/to/Qwen2___5-Omni-7B \
+SAM2_CHECKPOINT=/path/to/sam2_hiera_large.pt \
 INIT_ADAPTER=/path/to/stage1_initializer_adapter \
-DATA_DIR=/path/to/reviewed_merged_sft_dir \
+DATA_DIR=outputs/data/sft_relocated \
+OUTPUT_DIR=outputs/train/sam2_merged_sft_3epoch_8gpu \
 bash scripts/sft/train_merged_sam2_sft_3epoch_8gpu.sh
 
-# Qwen2.5-Omni + SAM (ViT-H) Stage-1 joint SFT
-MODEL_PATH=models/Qwen2___5-Omni-3B \
-AURORA_SAM_CHECKPOINT=models/sam_vit_h_4b8939.pth \
+# Qwen2.5-Omni + SAM (ViT-H) Stage-1 joint SFT (defaults to refavs_train.jsonl)
+MODEL_PATH=/path/to/Qwen2___5-Omni-3B \
+AURORA_SAM_CHECKPOINT=/path/to/sam_vit_h_4b8939.pth \
+TRAIN_JSONL=outputs/data/refavs/refavs_train.jsonl \
+VAL_JSONL=outputs/data/refavs/refavs_val.jsonl \
 bash scripts/sft/train_qwen2_5_omni_swift_sft.sh
 ```
 
 ### 3. GRPO & Online Verified Routed OPD (`scripts/grpo/`, `scripts/opd/`)
 ```bash
-# SAM2 Baseline GRPO (8 GPUs)
+# SAM2 Baseline GRPO (8 GPUs; compatible with merged or Answer-CoT 3-epoch SFT)
+MODEL=/path/to/Qwen2___5-Omni-7B \
+SAM2_CHECKPOINT=/path/to/sam2_hiera_large.pt \
+SFT_CHECKPOINT=/path/to/merged_sft/checkpoint-4809 \
+TRAIN_SOURCE=outputs/data/sft_relocated/structured_cot.jsonl \
+VAL_SOURCE=outputs/data/eval_relocated/refavs_val.jsonl \
+DATA_DIR=outputs/data/grpo_sam2_class_mask \
+DATASET_AUDIT=outputs/artifacts/audit.json \
+OUTPUT_DIR=outputs/train/qwen2_5_omni_7b_sam2_grpo \
 bash scripts/grpo/train_qwen2_5_omni_7b_sam2_grpo_8gpu.sh
 
 # Online Current-Policy Verified OPD / GRPO / Joint (ARM = grpo | opd | joint)
 ARM=joint \
+MODEL=/path/to/Qwen2___5-Omni-7B \
+SAM2_CHECKPOINT=/path/to/sam2_hiera_large.pt \
 SFT_CHECKPOINT=/path/to/sam2_sft_checkpoint \
 DATA_ROOT=/path/to/student_only_opd_data \
 OUTPUT_DIR=outputs/train/online_joint_8gpu \
@@ -184,30 +240,50 @@ bash scripts/opd/run_current_policy_opd_8gpu.sh
 
 # Mask-Primary GRPO or Decision-Span OPD (ARM = grpo | decision)
 ARM=decision \
+MODEL=/path/to/Qwen2___5-Omni-7B \
+SAM2_CHECKPOINT=/path/to/sam2_hiera_large.pt \
 SFT_CHECKPOINT=/path/to/sam2_sft_checkpoint \
 DATA_ROOT=/path/to/student_only_opd_data \
+DATASET_AUDIT=outputs/artifacts/audit.json \
 OUTPUT_DIR=outputs/train/mask_primary_decision_8gpu \
 bash scripts/opd/run_mask_primary_train_8gpu.sh
 
-# Dual Audio/Class Gated OPSD (8 GPUs)
+# Dual Audio/Class Gated OPSD (8 GPUs; legacy 3B default FPS=2.0, overridable via FPS=1.0)
+BASE_MODEL=/path/to/Qwen2___5-Omni-3B \
+STAGE1_ADAPTERS=/path/to/stage1_checkpoint \
+TEACHER_ADAPTERS=/path/to/stage1_checkpoint \
+AURORA_SAM_CHECKPOINT=/path/to/sam_vit_h_4b8939.pth \
+TRAIN_JSONL=outputs/data/refavs/refavs_train.jsonl \
+VAL_JSONL=outputs/data/refavs/refavs_val.jsonl \
 bash scripts/opd/run_opsd_audio_class_gate_8gpu.sh
 ```
 
 ### 4. Evaluation (`scripts/eval/`)
 ```bash
-# Official Qwen2.5-Omni + SAM/SAM2 evaluation on test_s and test_u (saves all predicted frame masks & per-frame IoU/Dice)
+# Official Qwen2.5-Omni + SAM2 evaluation on test_s and test_u.
+# Saves all predicted frame masks and per-frame IoU/Dice, and enforces
+# checkpoint-matched max_pixels, max_length, FPS, dtype, and prompt parity.
+FPS=1.0 AURORA_VIDEO_FPS=1.0 \
+AURORA_SEG_BACKEND=sam2 AURORA_SAM2_CHECKPOINT=/path/to/sam2_hiera_large.pt \
 torchrun --standalone --nproc_per_node=8 scripts/eval/test_qwen2_5_omni_refavs.py \
-  --model models/Qwen2___5-Omni-7B \
+  --model /path/to/Qwen2___5-Omni-7B \
   --checkpoint /path/to/checkpoint \
-  --data-dir /path/to/eval_data \
+  --data-dir outputs/data/eval_relocated \
   --output-dir outputs/eval/run_official \
   --splits test_s test_u \
+  --torch-dtype float16 --attn-impl sdpa \
+  --max-pixels 200704 --max-length 5120 \
+  --dataset-timing-audit outputs/artifacts/audit.json \
+  --train-prompt-source outputs/data/sft_relocated/structured_cot.jsonl \
   --run-sam --save-masks
 
 # Legacy SAM ViT-H two-stage evaluation only (NOT interchangeable with SAM2).
 # Check each checkpoint's actual training FPS and max length before use.
 FAMILY=qwen2_5 \
+MODEL_PATH=/path/to/Qwen2___5-Omni-7B \
 CHECKPOINT=/path/to/checkpoint \
+DATA_DIR=outputs/data/eval_relocated \
+SAM_CHECKPOINT=/path/to/sam_vit_h_4b8939.pth \
 OUTPUT_DIR=outputs/eval/two_stage_run \
 GPU_GROUPS='0;1;2;3' BATCH_SIZE=2 \
 bash scripts/eval/eval_omni_two_stage.sh

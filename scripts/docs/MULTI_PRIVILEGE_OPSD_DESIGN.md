@@ -79,6 +79,6 @@ mask loss以Student rollout后的SEG解码为条件，选择Teacher提示质量�
 
 ## 6. 项目实现审计
 
-当前scripts/train_opsd_swift.sh对相同model路径建立Teacher alias，明确避免ms-swift隐式self-distillation关闭adapter，以便加载SFT Teacher adapter。那是既有冻结Teacher实现；若新方案要求每步Teacher与当前Student同权，不能只凭“同基座/同初始化”称为已满足。
+当前 `scripts/opd/train_opsd_swift.sh` 对相同 model 路径建立 Teacher alias，明确避免 ms-swift 隐式 self-distillation 关闭 adapter，以便加载 SFT Teacher adapter。那是既有冻结 Teacher 实现；若新方案要求每步 Teacher 与当前 Student 同权，不能只凭“同基座/同初始化”称为已满足。
 
 后续实现需明确选择：当前参数detach分支（本主版）、冻结初始SFT Teacher、或EMA Teacher。后两者涉及参数差异，delta混合输入优势与模型优势。没有在本轮修改这些行为。

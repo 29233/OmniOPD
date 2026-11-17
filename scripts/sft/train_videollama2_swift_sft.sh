@@ -2,20 +2,55 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+export PYTHONUTF8=1 LANG=C.UTF-8 LC_ALL=C.UTF-8
+if [[ "${OMNIOPD_LOAD_ENV:-0}" == "1" && -f "${ROOT_DIR}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${ROOT_DIR}/.env"
+  set +a
+fi
 SOURCE_DIR="${AURORA_SOURCE_DIR:-.}"
-SWIFT_ROOT="${MS_SWIFT_ROOT:-third_party/ms-swift}"
+SWIFT_ROOT="${MS_SWIFT_ROOT:-${ROOT_DIR}/third_party/ms-swift}"
+if [[ -z "${SWIFT_ENV:-}" ]]; then
+  if [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/python" ]]; then
+    SWIFT_ENV="${VIRTUAL_ENV}"
+  elif [[ -n "${CONDA_PREFIX:-}" && "${CONDA_DEFAULT_ENV:-base}" != "base" && -x "${CONDA_PREFIX}/bin/python" ]]; then
+    SWIFT_ENV="${CONDA_PREFIX}"
+  elif [[ -x "${ROOT_DIR}/.venv/bin/python" ]]; then
+    SWIFT_ENV="${ROOT_DIR}/.venv"
+  fi
+fi
+if [[ -z "${PYTHON_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/python" ]]; then
+    PYTHON_BIN="${SWIFT_ENV}/bin/python"
+  else
+    PYTHON_BIN="$(command -v python3 || command -v python || true)"
+  fi
+elif [[ "${PYTHON_BIN}" != */* ]]; then
+  PYTHON_BIN="$(command -v "${PYTHON_BIN}" || true)"
+fi
+if [[ -z "${SWIFT_BIN:-}" ]]; then
+  if [[ -n "${SWIFT_ENV:-}" && -x "${SWIFT_ENV}/bin/swift" ]]; then
+    SWIFT_BIN="${SWIFT_ENV}/bin/swift"
+  else
+    SWIFT_BIN="$(command -v swift || true)"
+  fi
+elif [[ "${SWIFT_BIN}" != */* ]]; then
+  SWIFT_BIN="$(command -v "${SWIFT_BIN}" || true)"
+fi
+export SWIFT_ENV PYTHON_BIN SWIFT_BIN
 MODEL_PATH="${MODEL_PATH:-${SOURCE_DIR}/models/VideoLLaMA2.1-7B-AV}"
-DATA_JSONL="${AURORA_DATA_JSONL:-${ROOT_DIR}/outputs/data/refavs/refavs_full.jsonl}"
-VAL_JSONL="${AURORA_VAL_JSONL:-${ROOT_DIR}/outputs/data/refavs/refavs_val.jsonl}"
+_DEFAULT_VL2_TRAIN="${ROOT_DIR}/outputs/data/refavs/refavs_train.jsonl"
+if [[ ! -f "${_DEFAULT_VL2_TRAIN}" && -f "${ROOT_DIR}/outputs/data/refavs/refavs_full.jsonl" ]]; then
+  _DEFAULT_VL2_TRAIN="${ROOT_DIR}/outputs/data/refavs/refavs_full.jsonl"
+fi
+DATA_JSONL="${AURORA_DATA_JSONL:-${TRAIN_JSONL:-${_DEFAULT_VL2_TRAIN}}}"
+VAL_JSONL="${AURORA_VAL_JSONL:-${VAL_JSONL:-${ROOT_DIR}/outputs/data/refavs/refavs_val.jsonl}}"
 OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/outputs/train/videollama2_sft}"
 DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG:-}"
-SWIFT_BIN="${SWIFT_BIN:-swift}"
-PYTHON_BIN="${PYTHON_BIN:-python}"
 SWIFT_MODULE="${SWIFT_MODULE:-}"
 MAX_SAMPLES="${MAX_SAMPLES:--1}"
 VAL_MAX_SAMPLES="${VAL_MAX_SAMPLES:--1}"
-DATASET_SPEC="${DATA_JSONL}"
-VAL_DATASET_SPEC="${VAL_JSONL}"
 if [[ ! -f "${DATA_JSONL}" && -f "${ROOT_DIR}/outputs/data/refavs/refavs_full.jsonl" ]]; then
   echo "Warning: data path is missing; using ${ROOT_DIR}/outputs/data/refavs/refavs_full.jsonl" >&2
   DATA_JSONL="${ROOT_DIR}/outputs/data/refavs/refavs_full.jsonl"
@@ -33,7 +68,10 @@ if (( VAL_MAX_SAMPLES > 0 )); then
   VAL_DATASET_SPEC="${VAL_JSONL}#${VAL_MAX_SAMPLES}"
 fi
 
-export PYTHONPATH="${ROOT_DIR}:${ROOT_DIR}/VideoLLaMA2av:${SWIFT_ROOT}:${PYTHONPATH:-}"
+export PYTHONPATH="${ROOT_DIR}/third_party/sam2:${ROOT_DIR}:${ROOT_DIR}/VideoLLaMA2av:${PYTHONPATH:-}"
+if [[ -n "${MS_SWIFT_ROOT:-}" ]]; then
+  export PYTHONPATH="${MS_SWIFT_ROOT}:${PYTHONPATH}"
+fi
 export VIDEOLLAMA2_MODEL_PATH="${MODEL_PATH}"
 export VIDEOLLAMA2_SIGLIP_PATH="${VIDEOLLAMA2_SIGLIP_PATH:-${SOURCE_DIR}/models/siglip-so400m-patch14-384}"
 export VIDEOLLAMA2_AUDIO_TOWER_PATH="${VIDEOLLAMA2_AUDIO_TOWER_PATH:-${MODEL_PATH}/audio_tower.bin}"

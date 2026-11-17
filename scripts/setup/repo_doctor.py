@@ -33,6 +33,7 @@ REQUIRED = (
     "scripts/eval/test_qwen2_5_omni_refavs.py",
     "scripts/setup/bootstrap_ms_swift.sh",
     "scripts/setup/ms-swift-v4.5.2-teacher-adapters.patch",
+    "scripts/setup/requirements_sam2_runtime.txt",
     "scripts/setup/requirements_swift_observed_20261117.txt",
     "scripts/setup/requirements_mopd_overlay_observed_20261116.txt",
     "configs/deepspeed_zero2_fp16_v100.json",
@@ -46,7 +47,58 @@ REQUIRED = (
 )
 SOURCE_DIRS = ("swift_plugin", "scripts", "model/segment_anything",
                "third_party/sam2/sam2", "third_party/MOPD-Router-Omni/omni_mopd",
-               "third_party/MOPD-Router-Omni/verl/verl/models")
+               "third_party/MOPD-Router-Omni/verl/verl/models", "tests")
+OVERRIDABLE_LAUNCHER_VARS = (
+    "SFT_CHECKPOINT",
+    "DATA_ROOT",
+    "MODEL",
+    "MODEL_PATH",
+    "BASE_MODEL",
+    "SAM2_CHECKPOINT",
+    "INIT_ADAPTER",
+    "DATASET_AUDIT",
+)
+_LAUNCHER_ASSIGN_RE = re.compile(
+    r"(?:^|\s)(?:export\s+)?(" + "|".join(OVERRIDABLE_LAUNCHER_VARS) + r")=([^\s#]+)"
+)
+DOC_LINK_FILES = (
+    "README.md",
+    "COLLABORATION_HANDOFF.md",
+    "LOCAL_PACKAGE_GUIDE.md",
+    "MS_SWIFT_SFT.md",
+    "CONTRIBUTING.md",
+    "OUTPUT_LAYOUT.md",
+    "scripts/README.md",
+    "scripts/docs/INDEPENDENT_VERIFY.md",
+    "scripts/docs/MULTI_PRIVILEGE_OPSD_DESIGN.md",
+)
+
+
+def find_non_overridable_launcher_assignments(root: Path = ROOT) -> list[str]:
+    """Return launcher lines that assign primary path variables without :- or :?."""
+    root = Path(root)
+    launchers = []
+    for subdir in ("sft", "grpo", "opd", "eval"):
+        directory = root / "scripts" / subdir
+        if directory.is_dir():
+            launchers.extend(sorted(directory.glob("*.sh")))
+    omni_launcher = root / "third_party/MOPD-Router-Omni/run_omni.sh"
+    if omni_launcher.is_file():
+        launchers.append(omni_launcher)
+    violations = []
+    for path in launchers:
+        rel = path.relative_to(root)
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if not (stripped.startswith("export ") or re.match(r"^[A-Z0-9_]+=", stripped)):
+                continue
+            for match in _LAUNCHER_ASSIGN_RE.finditer(stripped):
+                var, rhs = match.group(1), match.group(2)
+                if f"${{{var}:-" not in rhs and f"${{{var}:?" not in rhs:
+                    violations.append(f"{rel}:{lineno}: unconditional {var}={rhs}")
+    return violations
 
 
 def check(root: Path = ROOT, *, run_shell_syntax: bool = True) -> dict:
@@ -63,8 +115,10 @@ def check(root: Path = ROOT, *, run_shell_syntax: bool = True) -> dict:
             if "__pycache__" in source.parts or "third_party/ms-swift" in str(source):
                 continue
             try:
-                ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
-            except (SyntaxError, UnicodeError) as exc:
+                text = source.read_text(encoding="utf-8")
+                ast.parse(text, filename=str(source))
+                compile(text, str(source), "exec")
+            except (SyntaxError, UnicodeError, ValueError) as exc:
                 errors.append(f"Python syntax: {source.relative_to(root)}: {exc}")
             count += 1
     if run_shell_syntax:
@@ -72,13 +126,17 @@ def check(root: Path = ROOT, *, run_shell_syntax: bool = True) -> dict:
             result = subprocess.run(["bash", "-n", str(path)], capture_output=True, text=True)
             if result.returncode:
                 errors.append(f"Shell syntax: {path.relative_to(root)}: {result.stderr.strip()[:250]}")
-        launcher = root / "third_party/MOPD-Router-Omni/run_omni.sh"
-        if launcher.is_file():
-            result = subprocess.run(["bash", "-n", str(launcher)], capture_output=True, text=True)
-            if result.returncode:
-                errors.append(f"Shell syntax: {launcher.relative_to(root)}: {result.stderr.strip()[:250]}")
+        mopd_dir = root / "third_party/MOPD-Router-Omni"
+        if mopd_dir.is_dir():
+            for launcher in sorted(mopd_dir.glob("*.sh")):
+                result = subprocess.run(["bash", "-n", str(launcher)], capture_output=True, text=True)
+                if result.returncode:
+                    errors.append(f"Shell syntax: {launcher.relative_to(root)}: {result.stderr.strip()[:250]}")
 
-    for document in ("README.md", "COLLABORATION_HANDOFF.md", "LOCAL_PACKAGE_GUIDE.md"):
+    for violation in find_non_overridable_launcher_assignments(root):
+        errors.append(f"Non-overridable launcher assignment: {violation}")
+
+    for document in DOC_LINK_FILES:
         path = root / document
         if not path.is_file():
             continue
@@ -136,11 +194,13 @@ def check(root: Path = ROOT, *, run_shell_syntax: bool = True) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=ROOT,
+                        help="Repository checkout root to audit (defaults to repo root)")
     parser.add_argument("--strict", action="store_true",
                         help="Nonzero exit if required source/scripts/links are broken")
     parser.add_argument("--output", type=Path, help="Optional JSON report path")
     args = parser.parse_args()
-    report = check()
+    report = check(args.root)
     payload = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
     print(payload, end="")
     if args.output:
